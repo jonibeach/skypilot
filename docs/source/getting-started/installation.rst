@@ -1923,6 +1923,33 @@ Verda |community-badge|
 4. Alternatively, you can set the environment variables :code:`VERDA_CLIENT_ID` and :code:`VERDA_CLIENT_SECRET`.
 5. You are all set! Verda Cloud does not require any additional setup or dependencies.
 
+.. _verda-object-storage-installation:
+
+Verda object storage
+^^^^^^^^^^^^^^^^^^^^
+
+Verda also offers S3-compatible object storage. SkyPilot can download/upload data to Verda buckets and mount them as a local filesystem on clusters launched by SkyPilot. To set up Verda object storage support:
+
+1. Install the AWS dependencies:
+
+.. code-block:: shell
+
+  pip install "skypilot[verda]"
+
+2. In the `Verda Console <https://console.verda.com/>`__, go to *Project management → Credentials → Object Storage Access Keys* and create an access key.
+3. Save the access key and the endpoint URL in two AWS-style files under ``~/.verda``:
+
+.. code-block:: shell
+
+  AWS_SHARED_CREDENTIALS_FILE=~/.verda/s3.credentials aws configure --profile verda
+  AWS_CONFIG_FILE=~/.verda/s3.config aws configure set endpoint_url https://objects.fin-03.verda.storage --profile verda
+
+4. Check that SkyPilot can see the credentials:
+
+.. code-block:: shell
+
+  sky check verda
+
 
 .. _docker-image:
 

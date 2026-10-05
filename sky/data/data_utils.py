@@ -27,6 +27,7 @@ from sky.adaptors import nebius
 from sky.adaptors import oci
 from sky.adaptors import oci_s3
 from sky.adaptors import vastdata
+from sky.adaptors import verda
 from sky.skylet import constants
 from sky.skylet import log_lib
 from sky.utils import common_utils
@@ -746,6 +747,7 @@ class Rclone:
         NEBIUS = 'NEBIUS'
         COREWEAVE = 'COREWEAVE'
         VASTDATA = 'VASTDATA'
+        VERDA = 'VERDA'
         OCI = 'OCI'
 
         def get_profile_name(self, bucket_name: str) -> str:
@@ -767,6 +769,7 @@ class Rclone:
                 Rclone.RcloneStores.NEBIUS: 'sky-nebius',
                 Rclone.RcloneStores.COREWEAVE: 'sky-coreweave',
                 Rclone.RcloneStores.VASTDATA: 'sky-vastdata',
+                Rclone.RcloneStores.VERDA: 'sky-verda',
                 Rclone.RcloneStores.OCI: 'sky-oci',
             }
             return f'{profile_prefix[self]}-{bucket_name}'
@@ -942,6 +945,24 @@ class Rclone:
                     endpoint = {endpoint_url}
                     region = auto
                     acl = private
+                    """)
+            elif self is Rclone.RcloneStores.VERDA:
+                verda_session = verda.session()
+                verda_credentials = verda.get_verda_s3_credentials(
+                    verda_session)
+                endpoint_url = verda.get_endpoint()
+                access_key_id = verda_credentials.access_key
+                secret_access_key = verda_credentials.secret_key
+                config = textwrap.dedent(f"""\
+                    [{rclone_profile_name}]
+                    type = s3
+                    provider = Other
+                    access_key_id = {access_key_id}
+                    secret_access_key = {secret_access_key}
+                    endpoint = {endpoint_url}
+                    region = {verda.DEFAULT_REGION}
+                    acl = private
+                    force_path_style = true
                     """)
             else:
                 with ux_utils.print_exception_no_traceback():
@@ -1231,4 +1252,41 @@ def verify_vastdata_bucket(name: str) -> bool:
         return False
     except Exception as e:  # pylint: disable=broad-except
         logger.debug(f'Unexpected error checking VastData bucket {name}: {e}')
+        return False
+
+
+def create_verda_client() -> Client:
+    """Create Verda object storage S3 client."""
+    return verda.client('s3')
+
+
+def split_verda_path(verda_path: str) -> Tuple[str, str]:
+    """Splits a Verda path into bucket name and relative path to the bucket
+
+    Args:
+      verda_path: str; Verda path, e.g. verda://imagenet/train/
+    """
+    path_parts = verda_path.replace('verda://', '').split('/')
+    bucket = path_parts.pop(0)
+    key = '/'.join(path_parts)
+    return bucket, key
+
+
+def verify_verda_bucket(name: str) -> bool:
+    """Verify the Verda bucket exists and is accessible."""
+    verda_client = create_verda_client()
+    try:
+        verda_client.head_bucket(Bucket=name)
+        return True
+    except verda.botocore_exceptions().ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == '403':
+            logger.error(f'Access denied to bucket {name}')
+        elif error_code == '404':
+            logger.debug(f'Bucket {name} does not exist')
+        else:
+            logger.debug(f'Unexpected error checking Verda bucket {name}: {e}')
+        return False
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Unexpected error checking Verda bucket {name}: {e}')
         return False

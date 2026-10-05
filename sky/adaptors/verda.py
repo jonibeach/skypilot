@@ -1,13 +1,39 @@
 """Verda Cloud adaptor."""
 
+import configparser
+import contextlib
 import dataclasses
 from json import load as json_load
 from json import loads
 import os
+import threading
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
+
+from sky import sky_logging
+from sky.adaptors import common
+from sky.utils import annotations
+from sky.utils import ux_utils
+
+logger = sky_logging.init_logger(__name__)
+
+VERDA_S3_PROFILE_NAME = 'verda'
+VERDA_S3_CREDENTIALS_PATH = '~/.verda/s3.credentials'
+VERDA_S3_CONFIG_PATH = '~/.verda/s3.config'
+DEFAULT_REGION = 'us-east-1'
+_DEFAULT_ENDPOINT = 'https://objects.fin-03.verda.storage'
+
+_IMPORT_ERROR_MESSAGE = ('Failed to import dependencies for Verda object '
+                         'storage. Try pip install "skypilot[verda]"')
+
+boto3 = common.LazyImport('boto3', import_error_message=_IMPORT_ERROR_MESSAGE)
+botocore = common.LazyImport('botocore',
+                             import_error_message=_IMPORT_ERROR_MESSAGE)
+
+_LAZY_MODULES = (boto3, botocore)
+_session_creation_lock = threading.RLock()
 
 
 @dataclasses.dataclass
@@ -620,3 +646,171 @@ class VerdaClient:
         payload = {'id': [instance_id], 'action': action}
         self.http_client.put('/instances', body=payload)
         return None
+
+
+@contextlib.contextmanager
+def _load_verda_s3_credentials_env():
+    """Context manager to temporarily change the AWS credentials file path."""
+    prev_credentials_path = os.environ.get('AWS_SHARED_CREDENTIALS_FILE')
+    prev_config_path = os.environ.get('AWS_CONFIG_FILE')
+    os.environ['AWS_SHARED_CREDENTIALS_FILE'] = VERDA_S3_CREDENTIALS_PATH
+    os.environ['AWS_CONFIG_FILE'] = VERDA_S3_CONFIG_PATH
+    try:
+        yield
+    finally:
+        if prev_credentials_path is None:
+            del os.environ['AWS_SHARED_CREDENTIALS_FILE']
+        else:
+            os.environ['AWS_SHARED_CREDENTIALS_FILE'] = prev_credentials_path
+        if prev_config_path is None:
+            del os.environ['AWS_CONFIG_FILE']
+        else:
+            os.environ['AWS_CONFIG_FILE'] = prev_config_path
+
+
+def get_verda_s3_credentials(boto3_session):
+    """Gets the Verda object storage credentials from a boto3 session.
+
+    Args:
+        boto3_session: The boto3 session object.
+    Returns:
+        botocore.credentials.ReadOnlyCredentials object with the Verda
+        object storage credentials.
+    """
+    with _load_verda_s3_credentials_env():
+        verda_credentials = boto3_session.get_credentials()
+        if verda_credentials is None:
+            with ux_utils.print_exception_no_traceback():
+                raise ValueError('Verda object storage credentials not found. '
+                                 'Run `sky check` to verify credentials are '
+                                 'correctly set up.')
+        return verda_credentials.get_frozen_credentials()
+
+
+@annotations.lru_cache(scope='global')
+def session():
+    """Create an AWS session for Verda object storage."""
+    # Creating the session object is not thread-safe for boto3,
+    # so we add a reentrant lock to synchronize the session creation.
+    # Reference: https://github.com/boto/boto3/issues/1592
+    with _session_creation_lock:
+        with _load_verda_s3_credentials_env():
+            session_ = boto3.session.Session(profile_name=VERDA_S3_PROFILE_NAME)
+        return session_
+
+
+@annotations.lru_cache(scope='global')
+def resource(resource_name: str, **kwargs):
+    """Create a Verda object storage resource.
+
+    Args:
+        resource_name: Verda resource name (e.g., 's3').
+        kwargs: Other options.
+    """
+    # Need to use the resource retrieved from the per-thread session
+    # to avoid thread-safety issues (Directly creating the client
+    # with boto3.resource() is not thread-safe).
+    # Reference: https://stackoverflow.com/a/59635814
+    session_ = session()
+    verda_credentials = get_verda_s3_credentials(session_)
+
+    return session_.resource(
+        resource_name,
+        endpoint_url=get_endpoint(),
+        aws_access_key_id=verda_credentials.access_key,
+        aws_secret_access_key=verda_credentials.secret_key,
+        region_name=DEFAULT_REGION,
+        config=botocore.config.Config(s3={'addressing_style': 'path'}),
+        **kwargs)
+
+
+@annotations.lru_cache(scope='global')
+def client(service_name: str):
+    """Create a Verda object storage client of a certain service.
+
+    Args:
+        service_name: Verda service name (e.g., 's3').
+    """
+    # Need to use the client retrieved from the per-thread session
+    # to avoid thread-safety issues (Directly creating the client
+    # with boto3.client() is not thread-safe).
+    # Reference: https://stackoverflow.com/a/59635814
+    session_ = session()
+    verda_credentials = get_verda_s3_credentials(session_)
+
+    return session_.client(
+        service_name,
+        endpoint_url=get_endpoint(),
+        aws_access_key_id=verda_credentials.access_key,
+        aws_secret_access_key=verda_credentials.secret_key,
+        region_name=DEFAULT_REGION,
+        config=botocore.config.Config(s3={'addressing_style': 'path'}),
+    )
+
+
+@common.load_lazy_modules(_LAZY_MODULES)
+def botocore_exceptions():
+    """AWS botocore exception."""
+    # pylint: disable=import-outside-toplevel
+    from botocore import exceptions as boto_exceptions
+    return boto_exceptions
+
+
+def get_endpoint():
+    """Parse the VERDA_S3_CONFIG_PATH to get the endpoint_url.
+
+    The config file is an AWS-style config file with format:
+        [profile verda]
+        endpoint_url = https://objects.fin-03.verda.storage
+
+    Returns:
+        str: The endpoint URL from the config file, or the default endpoint
+             if the file doesn't exist or doesn't contain the endpoint_url.
+    """
+    config_path = os.path.expanduser(VERDA_S3_CONFIG_PATH)
+    if not os.path.isfile(config_path):
+        return _DEFAULT_ENDPOINT
+
+    try:
+        config = configparser.ConfigParser()
+        config.read(config_path)
+
+        profile_section = f'profile {VERDA_S3_PROFILE_NAME}'
+        if config.has_section(profile_section):
+            if config.has_option(profile_section, 'endpoint_url'):
+                endpoint = config.get(profile_section, 'endpoint_url')
+                return endpoint.strip()
+    except (configparser.Error, OSError) as e:
+        logger.warning(f'Failed to parse Verda object storage config file: '
+                       f'{e}. Using default endpoint: {_DEFAULT_ENDPOINT}')
+
+    return _DEFAULT_ENDPOINT
+
+
+def _s3_profile_exists(file_path: str, header: str) -> bool:
+    expanded = os.path.expanduser(file_path)
+    if not os.path.isfile(expanded):
+        return False
+    with open(expanded, 'r', encoding='utf-8') as f:
+        return any(header in line for line in f)
+
+
+def verda_s3_profile_in_cred() -> bool:
+    """Checks if the Verda profile is set in the S3 credentials file."""
+    return _s3_profile_exists(VERDA_S3_CREDENTIALS_PATH,
+                              f'[{VERDA_S3_PROFILE_NAME}]')
+
+
+def verda_s3_profile_in_config() -> bool:
+    """Checks if the Verda profile is set in the S3 config file."""
+    return _s3_profile_exists(VERDA_S3_CONFIG_PATH,
+                              f'[profile {VERDA_S3_PROFILE_NAME}]')
+
+
+def get_s3_credential_file_mounts() -> Dict[str, str]:
+    """Returns the Verda object storage credential file mounts."""
+    credential_file_mounts = {}
+    for path in (VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH):
+        if os.path.isfile(os.path.expanduser(path)):
+            credential_file_mounts[path] = path
+    return credential_file_mounts

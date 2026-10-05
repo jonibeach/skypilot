@@ -6,6 +6,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 from sky import catalog
 from sky import clouds
+from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import get_verda_configuration
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -17,6 +18,8 @@ if typing.TYPE_CHECKING:
 # Default images for Verda Cloud
 # These images are provided by Verda and include CUDA drivers
 VERDA_DEFAULT_IMAGE = 'ubuntu-24.04-cuda-12.8-open-docker'
+
+_INDENT_PREFIX = '    '
 
 
 @registry.CLOUD_REGISTRY.register
@@ -334,18 +337,56 @@ class Verda(clouds.Cloud):
         cls, cloud_capability: clouds.CloudCapability
     ) -> Tuple[bool, Optional[Union[str, Dict[str, str]]]]:
         """Check if Verda Cloud credentials are properly configured."""
-        del cloud_capability  # unused
+        if cloud_capability == clouds.CloudCapability.STORAGE:
+            return cls._check_storage_credentials()
         configured, error, _ = get_verda_configuration()
         return configured, error
+
+    @classmethod
+    def _check_storage_credentials(
+            cls) -> Tuple[bool, Optional[Union[str, Dict[str, str]]]]:
+        """Checks for access credentials to Verda object storage."""
+        profile_in_cred = verda_adaptor.verda_s3_profile_in_cred()
+        profile_in_config = verda_adaptor.verda_s3_profile_in_config()
+        if profile_in_cred and profile_in_config:
+            return True, None
+
+        profile = verda_adaptor.VERDA_S3_PROFILE_NAME
+        hints = ''
+        if not profile_in_cred:
+            hints = (f'[{profile}] profile is not set in '
+                     f'{verda_adaptor.VERDA_S3_CREDENTIALS_PATH}.')
+        if not profile_in_config:
+            if hints:
+                hints += ' Additionally, '
+            hints += (f'[profile {profile}] is not set in '
+                      f'{verda_adaptor.VERDA_S3_CONFIG_PATH}.')
+        hints += (
+            f'\n{_INDENT_PREFIX}Create an Object Storage access key in the '
+            'Verda console under Project management -> Credentials -> '
+            'Object Storage Access Keys, then run:')
+        if not profile_in_cred:
+            hints += f'\n{_INDENT_PREFIX}  $ pip install "skypilot[verda]"'
+            hints += (f'\n{_INDENT_PREFIX}  $ AWS_SHARED_CREDENTIALS_FILE='
+                      f'{verda_adaptor.VERDA_S3_CREDENTIALS_PATH} '
+                      f'aws configure --profile {profile}')
+        if not profile_in_config:
+            hints += (f'\n{_INDENT_PREFIX}  $ AWS_CONFIG_FILE='
+                      f'{verda_adaptor.VERDA_S3_CONFIG_PATH} aws configure '
+                      f'set endpoint_url {verda_adaptor.get_endpoint()} '
+                      f'--profile {profile}')
+        return False, hints
 
     @property
     def name(self):
         return 'verda'
 
     def get_credential_file_mounts(self) -> Dict[str, str]:
+        credential_file_mounts = verda_adaptor.get_s3_credential_file_mounts()
         if os.path.exists(self.CREDENTIALS_PATH):
-            return {f'{self.CREDENTIALS_PATH}': '~/.verda/config.json'}
-        return {}
+            credential_file_mounts[self.CREDENTIALS_PATH] = (
+                '~/.verda/config.json')
+        return credential_file_mounts
 
     @classmethod
     def get_user_identities(cls) -> Optional[List[List[str]]]:

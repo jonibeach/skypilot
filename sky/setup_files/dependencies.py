@@ -280,7 +280,7 @@ cloud_dependencies: Dict[str, List[str]] = {
     # Slurm hostlist expansion is implemented in sky.utils.hostlist_utils.
     'slurm': [],
     'yotta': [],  # No dependencies needed for Yotta
-    'verda': [],  # No dependencies needed for verda
+    'verda': aws_dependencies,
 }
 
 # Calculate which clouds should be included in the [all] installation.
