@@ -5,7 +5,7 @@ from json import load as json_load
 from json import loads
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -545,6 +545,14 @@ class InstanceStatus:
     HIBERNATING = 'hibernating'
     RESTORING = 'restoring'
     ERROR = 'error'
+    DISCONTINUED = 'discontinued'
+    UNKNOWN = 'unknown'
+    NOTFOUND = 'notfound'
+    NEW = 'new'
+    DELETING = 'deleting'
+    VALIDATING = 'validating'
+    NO_CAPACITY = 'no_capacity'
+    INSTALLATION_FAILED = 'installation_failed'
 
 
 class Instance:
@@ -556,6 +564,7 @@ class Instance:
         self.hostname = data['hostname']
         # For not yet provisioned instances, ip is not available
         self.ip = data.get('ip')
+        self.os_volume_id = data.get('os_volume_id')
 
 
 class SSHKey:
@@ -614,9 +623,15 @@ class VerdaClient:
         instance = self.instance_get(instance_id)
         return instance
 
-    def instance_action(self, instance_id: str, action: str) -> None:
+    def instance_action(self,
+                        instance_id: str,
+                        action: str,
+                        volume_ids: Optional[List[str]] = None) -> None:
         if self.http_client is None:
             self.http_client = _HTTPClient()
-        payload = {'id': [instance_id], 'action': action}
+        payload: Dict[str, Any] = {'id': [instance_id], 'action': action}
+        if volume_ids:
+            payload['volume_ids'] = volume_ids
+            payload['delete_permanently'] = True
         self.http_client.put('/instances', body=payload)
         return None

@@ -43,18 +43,10 @@ class Verda(clouds.Cloud):
             (f'Custom network tier is not supported yet on {_REPR}.'),
         clouds.CloudImplementationFeatures.OPEN_PORTS:
             (f'Opening ports is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
-            (f'Mounting object stores is not supported on {_REPR}. To read '
-             f'data from object stores on {_REPR}, use `mode: COPY` to copy '
-             'the data to local disk.'),
-        clouds.CloudImplementationFeatures.HOST_CONTROLLERS:
-            (f'Host controllers are not supported yet on {_REPR}.'),
         clouds.CloudImplementationFeatures.HIGH_AVAILABILITY_CONTROLLERS:
             (f'High availability controllers are not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.AUTOSTOP:
             (f'Auto-stop is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.AUTODOWN:
-            (f'Auto-down is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_MULTI_NETWORK:
             ('Customized multiple network interfaces are not supported '
              f'on {_REPR}.'),
@@ -168,6 +160,11 @@ class Verda(clouds.Cloud):
         """Returns the hourly cost of the accelerators, in dollars/hour."""
         del accelerators, use_spot, region, zone  # unused
         return 0.0  # Verda includes accelerators in the hourly cost.
+
+    def need_cleanup_after_preemption_or_failure(
+            self, resources: 'resources_lib.Resources') -> bool:
+        del resources  # unused
+        return True
 
     def get_egress_cost(self, num_gigabytes: float) -> float:
         return 0.0

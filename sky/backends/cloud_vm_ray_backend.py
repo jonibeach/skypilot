@@ -1849,8 +1849,8 @@ class RetryingVmProvisioner(object):
                 requested_features = self._requested_features.copy()
                 # Skip stop feature for Kubernetes and RunPod controllers.
                 if (isinstance(to_provision.cloud,
-                               (clouds.Kubernetes, clouds.RunPod)) and
-                        controller_utils.Controllers.from_name(cluster_name)
+                               (clouds.Kubernetes, clouds.RunPod, clouds.Verda))
+                        and controller_utils.Controllers.from_name(cluster_name)
                         is not None):
                     # If autostop is disabled in config, the feature may not be
                     # requested, so use discard() instead of remove().
@@ -6002,8 +6002,8 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if idle_minutes_to_autostop is not None:
             # Skip auto-stop for Kubernetes and RunPod clusters.
             if (isinstance(handle.launched_resources.cloud,
-                           (clouds.Kubernetes, clouds.RunPod)) and not down and
-                    idle_minutes_to_autostop >= 0):
+                           (clouds.Kubernetes, clouds.RunPod, clouds.Verda)) and
+                    not down and idle_minutes_to_autostop >= 0):
                 # We should hit this code path only for the controllers on
                 # Kubernetes and RunPod clusters, because autostop() will
                 # skip the supported feature check. Non-controller k8s/runpod
