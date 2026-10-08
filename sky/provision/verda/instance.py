@@ -8,6 +8,7 @@ from sky import sky_logging
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
+from sky.adaptors.verda import VerdaException
 from sky.clouds.verda import VERDA_DEFAULT_IMAGE
 from sky.provision import common
 from sky.resources import DEFAULT_DISK_SIZE_GB
@@ -96,6 +97,21 @@ def _get_head_instance_id(instances: Dict[str, Instance]) -> Optional[str]:
             head_instance_id = inst_id
             break
     return head_instance_id
+
+
+def _fallback_image(instance_type: str):
+    images = verda.images_get(instance_type)
+    candidates = ([
+        i for i in images
+        if i.startswith('24.04.cuda') and i.endswith('.docker')
+    ] + [i for i in images if i.startswith('24.04.cuda')] +
+                  [i for i in images if i == 'jupyter'])
+    if not candidates:
+        raise exceptions.ResourcesUnavailableError(
+            f'No supported Verda image for {instance_type}.')
+    logger.info(f'Default image is not valid for {instance_type}, '
+                f'using {candidates[0]}.')
+    return candidates[0]
 
 
 def find_ssh_key_id(public_key: str):
@@ -194,7 +210,14 @@ def run_instances(
             if is_spot:
                 instance_data['os_volume'][
                     'on_spot_discontinue'] = 'delete_permanently'
-            response = verda.instance_create(instance_data)
+            try:
+                response = verda.instance_create(instance_data)
+            except VerdaException as e:
+                if (image != VERDA_DEFAULT_IMAGE or
+                        'Operating system is not valid' not in e.message):
+                    raise
+                instance_data['image'] = _fallback_image(instance_type)
+                response = verda.instance_create(instance_data)
             instance_id = response.instance_id
         except Exception as e:  # pylint: disable=broad-except
             # API errors - provide specific message

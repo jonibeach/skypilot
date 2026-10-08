@@ -601,6 +601,13 @@ class VerdaClient:
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
 
+    def images_get(self, instance_type: str):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        response = self.http_client.get('/images',
+                                        params={'instance_type': instance_type})
+        return [image['image_type'] for image in response.json()]
+
     def ssh_keys_get(self) -> List[SSHKey]:
         """Get all ssh keys."""
         if self.http_client is None:
