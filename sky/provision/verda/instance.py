@@ -152,7 +152,7 @@ def run_instances(
             provider_name='verda',
             cluster_name=cluster_name_on_cloud,
             region=region,
-            zone=config.provider_config['zones'],
+            zone=None,
             head_instance_id=head_instance_id,
             resumed_instance_ids=list(newly_started_instances.keys()),
             created_instance_ids=[],
