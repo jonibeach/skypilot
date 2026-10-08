@@ -29,8 +29,7 @@ def test_verda_credential_file_mounts():
             m.setattr(verda.Verda, "CREDENTIALS_PATH", str(cred_path))
             cloud = verda.Verda()
             mounts = cloud.get_credential_file_mounts()
-            assert str(cred_path) in mounts
-            assert mounts[str(cred_path)] == "~/.verda/config.json"
+            assert mounts["~/.verda/config.json"] == str(cred_path)
 
 
 def test_verda_region_zone_validation_disallows_zones():
