@@ -135,7 +135,7 @@ def _format_accelerator_name(gpu_model: str, gpu_memory_gb: float) -> str:
             raise ValueError(f'Unsupported A100 memory: {gpu_memory_gb}')
 
     if gpu_model != accelerator_name:
-        print(f'Accelerator name: {gpu_model} -> {accelerator_name}')
+        logger.debug(f'Accelerator name: {gpu_model} -> {accelerator_name}')
     return accelerator_name
 
 
@@ -168,6 +168,78 @@ def _build_gpu_info(accelerator_name: str, num_gpus: int,
     }
     # Convert to JSON string (csv.writer will handle proper escaping)
     return json.dumps(gpu_info_dict)
+
+
+def write_catalog(f, instance_types: List[Dict], locations: List[str]):
+    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+
+    # Write header
+    writer.writerow([
+        'InstanceType',
+        'UpstreamCloudId',
+        'vCPUs',
+        'MemoryGiB',
+        'AcceleratorName',
+        'AcceleratorCount',
+        'GpuInfo',
+        'Region',
+        'Price',
+        'SpotPrice',
+    ])
+
+    for instance in instance_types:
+        try:
+            # Extract data from instance dictionary
+            instance_type_id = instance.get('instance_type', '')
+            cpu_data = instance.get('cpu', {})
+            memory_data = instance.get('memory', {})
+            gpu_data = instance.get('gpu', {})
+            gpu_memory_data = instance.get('gpu_memory', {})
+
+            vcpus = (float(cpu_data.get('number_of_cores', 0))
+                     if cpu_data else 0)
+            memory_gib = (float(memory_data.get('size_in_gigabytes', 0))
+                          if memory_data else 0)
+            price = float(instance.get('price_per_hour', 0))
+            # Get spot price if available
+            spot_price_raw = instance.get('spot_price') or instance.get(
+                'spot_price_per_hour')
+            spot_price = float(spot_price_raw) if spot_price_raw else ''
+
+            # GPU information
+            num_gpus = gpu_data.get('number_of_gpus', 0) if gpu_data else 0
+            gpu_memory_gb = (gpu_memory_data.get('size_in_gigabytes', 0)
+                             if gpu_memory_data else 0)
+
+            # Extract and format GPU model
+            if num_gpus > 0:
+                gpu_model = _extract_gpu_model(instance)
+                accelerator_name = _format_accelerator_name(
+                    gpu_model, int(gpu_memory_gb / num_gpus))
+                gpu_info = _build_gpu_info(accelerator_name, num_gpus,
+                                           gpu_memory_gb)
+            else:
+                accelerator_name = ''
+                gpu_info = ''
+
+            for region in locations:
+                writer.writerow([
+                    instance_type_id,
+                    instance_type_id,
+                    vcpus,
+                    memory_gib,
+                    accelerator_name,
+                    float(num_gpus) if num_gpus > 0 else '',
+                    gpu_info,
+                    region,
+                    price,
+                    spot_price,
+                ])
+        except Exception as e:  # pylint: disable=broad-except
+            instance_type_id = instance.get('instance_type', 'unknown')
+            logger.warning(
+                f'Error processing instance type {instance_type_id}: {e}')
+            continue
 
 
 def create_catalog(output_path: str) -> None:
@@ -221,75 +293,7 @@ def create_catalog(output_path: str) -> None:
     # Create CSV file
     logger.info(f'Writing catalog to {output_path}')
     with open(output_path, 'w', encoding='utf-8') as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-
-        # Write header
-        writer.writerow([
-            'InstanceType',
-            'UpstreamCloudId',
-            'vCPUs',
-            'MemoryGiB',
-            'AcceleratorName',
-            'AcceleratorCount',
-            'GpuInfo',
-            'Region',
-            'Price',
-            'SpotPrice',
-        ])
-
-        for instance in instance_types:
-            try:
-                # Extract data from instance dictionary
-                instance_type_id = instance.get('instance_type', '')
-                cpu_data = instance.get('cpu', {})
-                memory_data = instance.get('memory', {})
-                gpu_data = instance.get('gpu', {})
-                gpu_memory_data = instance.get('gpu_memory', {})
-
-                vcpus = (float(cpu_data.get('number_of_cores', 0))
-                         if cpu_data else 0)
-                memory_gib = (float(memory_data.get('size_in_gigabytes', 0))
-                              if memory_data else 0)
-                price = float(instance.get('price_per_hour', 0))
-                # Get spot price if available
-                spot_price_raw = instance.get('spot_price') or instance.get(
-                    'spot_price_per_hour')
-                spot_price = float(spot_price_raw) if spot_price_raw else ''
-
-                # GPU information
-                num_gpus = gpu_data.get('number_of_gpus', 0) if gpu_data else 0
-                gpu_memory_gb = (gpu_memory_data.get('size_in_gigabytes', 0)
-                                 if gpu_memory_data else 0)
-
-                # Extract and format GPU model
-                if num_gpus > 0:
-                    gpu_model = _extract_gpu_model(instance)
-                    accelerator_name = _format_accelerator_name(
-                        gpu_model, int(gpu_memory_gb / num_gpus))
-                    gpu_info = _build_gpu_info(accelerator_name, num_gpus,
-                                               gpu_memory_gb)
-                else:
-                    accelerator_name = ''
-                    gpu_info = ''
-
-                for region in locations:
-                    writer.writerow([
-                        instance_type_id,
-                        instance_type_id,
-                        vcpus,
-                        memory_gib,
-                        accelerator_name,
-                        float(num_gpus) if num_gpus > 0 else '',
-                        gpu_info,
-                        region,
-                        price,
-                        spot_price,
-                    ])
-            except Exception as e:  # pylint: disable=broad-except
-                instance_type_id = instance.get('instance_type', 'unknown')
-                logger.warning(
-                    f'Error processing instance type {instance_type_id}: {e}')
-                continue
+        write_catalog(f, instance_types, locations)
 
     logger.info(f'Verda catalog saved to {output_path}')
     logger.info(f'Processed {len(instance_types)} instance types')

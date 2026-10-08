@@ -592,6 +592,29 @@ class VerdaClient:
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
 
+    def instance_types_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return self.http_client.get('/instance-types').json()
+
+    def locations_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return [
+            location['code']
+            for location in self.http_client.get('/locations').json()
+        ]
+
+    def instance_availability_get(self, is_spot: bool):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        params = {'is_spot': 'true' if is_spot else 'false'}
+        response = self.http_client.get('/instance-availability',
+                                        params=params).json()
+        return {(instance_type, location['location_code'])
+                for location in response
+                for instance_type in location['availabilities']}
+
     def ssh_keys_get(self) -> List[SSHKey]:
         """Get all ssh keys."""
         if self.http_client is None:
