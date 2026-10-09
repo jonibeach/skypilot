@@ -1,35 +1,40 @@
 """Tests for Verda Cloud provider."""
 
+import json
 from pathlib import Path
-import tempfile
+import stat
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
 from sky import clouds
+from sky import exceptions
+from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
 from sky.clouds import verda
+from sky.provision.verda import instance as verda_instance
 
 
 def test_verda_cloud_basics():
     cloud = verda.Verda()
     assert cloud.name == "verda"
     assert cloud._REPR == "Verda"
-    assert cloud._MAX_CLUSTER_NAME_LEN_LIMIT == 120
+    assert cloud.max_cluster_name_length() == 52
 
 
-def test_verda_credential_file_mounts():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cred_path = Path(tmpdir) / "config.yaml"
-        cred_path.touch()
-        with pytest.MonkeyPatch.context() as m:
-            m.setattr(verda.Verda, "CREDENTIALS_PATH", str(cred_path))
-            cloud = verda.Verda()
-            mounts = cloud.get_credential_file_mounts()
-            assert mounts["~/.verda/config.json"] == str(cred_path)
+def test_verda_credential_file_mounts(monkeypatch, tmp_path):
+    config = verda_adaptor.VerdaConfiguration('id', 'secret', 'https://api',
+                                              'FIN-03')
+    monkeypatch.setattr(verda_adaptor, 'get_verda_configuration', lambda:
+                        (True, None, config))
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    mounts = verda.Verda().get_credential_file_mounts()
+    path = Path(mounts['~/.verda/config.json'])
+    assert json.loads(path.read_text())['client_secret'] == 'secret'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_verda_region_zone_validation_disallows_zones():
@@ -309,3 +314,102 @@ class TestVerdaClientInstanceCreation:
             client.instance_create({})
 
         assert "Can't connect to Verda Cloud" in str(exc_info.value)
+
+
+@pytest.mark.parametrize('prefix', ['VERDA', 'DATACRUNCH'])
+def test_environment_credentials_reach_remote(monkeypatch, tmp_path, prefix):
+    for name in ('VERDA_CLIENT_ID', 'VERDA_CLIENT_SECRET',
+                 'DATACRUNCH_CLIENT_ID', 'DATACRUNCH_CLIENT_SECRET'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(f'{prefix}_CLIENT_ID', 'env-id')
+    monkeypatch.setenv(f'{prefix}_CLIENT_SECRET', 'env-secret')
+    monkeypatch.setenv(f'{prefix}_BASE_URL', 'https://example.invalid/v1')
+    monkeypatch.setenv(f'{prefix}_DEFAULT_REGION', 'FIN-03')
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    mounts = verda.Verda().get_credential_file_mounts()
+    config = json.loads(Path(mounts['~/.verda/config.json']).read_text())
+    assert config == dict(client_id='env-id',
+                          client_secret='env-secret',
+                          base_url='https://example.invalid/v1',
+                          default_region='FIN-03')
+
+
+def test_atomic_credentials_keep_old_file_on_failure(monkeypatch, tmp_path):
+    path = tmp_path / 'credentials'
+    path.write_text('old')
+    monkeypatch.setattr(verda_adaptor.os, 'replace',
+                        MagicMock(side_effect=OSError('replace failed')))
+    with pytest.raises(OSError, match='replace failed'):
+        verda_adaptor._write_private(str(path), 'new')
+    assert path.read_text() == 'old'
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize('image', [
+    '24.04.cuda12.3.docker', 'ubuntu-24.04-cuda-12.3-docker',
+    'ubuntu-24.04-cuda-12.3', 'jupyter'
+])
+def test_image_fallback_accepts_supported_names(monkeypatch, image):
+    monkeypatch.setattr(verda_instance.verda, 'images_get', lambda _: [image])
+    assert verda_instance._fallback_image('gpu') == image
+
+
+def test_image_fallback_prefers_docker(monkeypatch):
+    monkeypatch.setattr(
+        verda_instance.verda, 'images_get', lambda _:
+        ['jupyter', 'ubuntu-24.04-cuda-12.3', 'ubuntu-24.04-cuda-12.3-docker'])
+    assert verda_instance._fallback_image('gpu').endswith('-docker')
+
+
+def test_pending_instance_wait_times_out(monkeypatch):
+    instance = Instance(
+        dict(id='pending', hostname='cluster-head', status='new'))
+    monkeypatch.setattr(verda_instance.verda, 'instances_get',
+                        lambda: [instance])
+    create = MagicMock()
+    monkeypatch.setattr(verda_instance.verda, 'instance_create', create)
+    monkeypatch.setattr(verda_instance, 'MAX_POLLS_FOR_UP_OR_TERMINATE', 2)
+    monkeypatch.setattr(verda_instance.time, 'sleep', lambda _: None)
+    with pytest.raises(exceptions.ResourcesUnavailableError, match='pending'):
+        verda_instance.run_instances('FIN-03', 'cluster', 'cluster',
+                                     MagicMock())
+    create.assert_not_called()
+
+
+def test_pending_instance_is_reused_when_ready(monkeypatch):
+    pending = Instance(
+        dict(id='existing', hostname='cluster-head', status='new'))
+    running = Instance(
+        dict(id='existing', hostname='cluster-head', status='running'))
+    instances = MagicMock(
+        side_effect=[[pending], [pending], [running], [running]])
+    monkeypatch.setattr(verda_instance.verda, 'instances_get', instances)
+    create = MagicMock()
+    monkeypatch.setattr(verda_instance.verda, 'instance_create', create)
+    monkeypatch.setattr(verda_instance.time, 'sleep', lambda _: None)
+    record = verda_instance.run_instances('FIN-03', 'cluster', 'cluster',
+                                          MagicMock(count=1))
+    assert record.head_instance_id == 'existing'
+    assert record.zone is None
+    create.assert_not_called()
+
+
+def test_custom_image_failure_does_not_trigger_fallback(monkeypatch):
+    monkeypatch.setattr(verda_instance.verda, 'instances_get', lambda: [])
+    monkeypatch.setattr(verda_instance, 'find_ssh_key_id', lambda _: 'key')
+    create = MagicMock(side_effect=verda_adaptor.VerdaException(
+        'invalid_request',
+        'Operating system is not valid for this instance type'))
+    monkeypatch.setattr(verda_instance.verda, 'instance_create', create)
+    fallback = MagicMock()
+    monkeypatch.setattr(verda_instance, '_fallback_image', fallback)
+    config = MagicMock(count=1,
+                       node_config={
+                           'InstanceType': 'gpu',
+                           'ImageId': 'custom',
+                           'PublicKey': 'public-key'
+                       })
+    with pytest.raises(exceptions.ResourcesUnavailableError):
+        verda_instance.run_instances('FIN-03', 'cluster', 'cluster', config)
+    fallback.assert_not_called()
+    create.assert_called_once()

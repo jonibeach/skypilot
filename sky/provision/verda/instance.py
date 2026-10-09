@@ -105,9 +105,11 @@ def _fallback_image(instance_type: str):
     images = verda.images_get(instance_type)
     candidates = ([
         i for i in images
-        if i.startswith('24.04.cuda') and i.endswith('.docker')
-    ] + [i for i in images if i.startswith('24.04.cuda')] +
-                  [i for i in images if i == 'jupyter'])
+        if (i.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-')) and i.endswith(
+            ('.docker', '-docker')))
+    ] + [
+        i for i in images if i.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-'))
+    ] + [i for i in images if i == 'jupyter'])
     if not candidates:
         raise exceptions.ResourcesUnavailableError(
             f'No supported Verda image for {instance_type}.')
@@ -135,7 +137,7 @@ def run_instances(
     del cluster_name  # unused
     newly_started_instances = _filter_instances(cluster_name_on_cloud,
                                                 _PENDING_STATUSES)
-    while True:
+    for _ in range(MAX_POLLS_FOR_UP_OR_TERMINATE):
         instances = _filter_instances(cluster_name_on_cloud, _PENDING_STATUSES)
         if not instances:
             break
@@ -143,13 +145,10 @@ def run_instances(
         logger.info(f'Waiting for {len(instances)} instances to be ready: '
                     f'{instance_statuses}')
         time.sleep(POLL_INTERVAL)
-
-    exist_instances = _filter_instances(cluster_name_on_cloud,
-                                        _PENDING_STATUSES)
-    if len(exist_instances) > config.count:
-        raise RuntimeError(
-            f'Cluster {cluster_name_on_cloud} already has '
-            f'{len(exist_instances)} nodes, but {config.count} are required.')
+    else:
+        raise exceptions.ResourcesUnavailableError(
+            f'Timed out waiting for pending Verda instances in '
+            f'cluster {cluster_name_on_cloud}.')
 
     exist_instances = _filter_instances(cluster_name_on_cloud,
                                         status_filters=[InstanceStatus.RUNNING])
@@ -253,6 +252,18 @@ def run_instances(
             logger.warning(f'API error during instance launch: {e}')
             with ux_utils.print_exception_no_traceback():
                 raise exceptions.ResourcesUnavailableError(error_msg) from e
+        if response.hostname != instance_data['hostname']:
+            verda.instance_action(instance_id=instance_id,
+                                  action='delete',
+                                  volume_ids=[response.os_volume_id]
+                                  if response.os_volume_id else None)
+            with ux_utils.print_exception_no_traceback():
+                raise exceptions.ResourcesUnavailableError(
+                    f'Verda changed the hostname {instance_data["hostname"]!r} '
+                    f'to {response.hostname!r}, so SkyPilot cannot track the '
+                    'instance. Deleted it. Try a shorter, lowercase cluster '
+                    'name.',
+                    no_failover=True)
         logger.info(f'Launched instance {instance_id}.')
         created_instance_ids.append(instance_id)
         if head_instance_id is None:

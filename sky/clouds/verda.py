@@ -6,6 +6,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 from sky import catalog
 from sky import clouds
+from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import get_verda_configuration
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -53,7 +54,7 @@ class Verda(clouds.Cloud):
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}'),
     }
-    _MAX_CLUSTER_NAME_LEN_LIMIT = 120
+    _MAX_CLUSTER_NAME_LEN_LIMIT = 52
     _MAX_VOLUME_NAME_LEN_LIMIT = 30
     CREDENTIALS_PATH = os.path.expanduser('~/.verda/config.json')
     PROVISIONER_VERSION = clouds.ProvisionerVersion.SKYPILOT
@@ -86,7 +87,7 @@ class Verda(clouds.Cloud):
         return unsupported_features
 
     @classmethod
-    def _max_cluster_name_length(cls) -> Optional[int]:
+    def max_cluster_name_length(cls) -> Optional[int]:
         return cls._MAX_CLUSTER_NAME_LEN_LIMIT
 
     @classmethod
@@ -340,9 +341,7 @@ class Verda(clouds.Cloud):
         return 'verda'
 
     def get_credential_file_mounts(self) -> Dict[str, str]:
-        if os.path.exists(self.CREDENTIALS_PATH):
-            return {'~/.verda/config.json': self.CREDENTIALS_PATH}
-        return {}
+        return verda_adaptor.get_compute_credential_file_mounts()
 
     @classmethod
     def get_user_identities(cls) -> Optional[List[List[str]]]:

@@ -1,13 +1,18 @@
 """Verda Cloud adaptor."""
 
 import dataclasses
+import hashlib
+import json
 from json import load as json_load
 from json import loads
 import os
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+_GENERATED_S3_DIR = '~/.sky/generated/verda'
 
 
 @dataclasses.dataclass
@@ -647,3 +652,32 @@ class VerdaClient:
             payload['delete_permanently'] = True
         self.http_client.put('/instances', body=payload)
         return None
+
+
+def _write_private(path: str, content: str):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w',
+                                     encoding='utf-8',
+                                     dir=directory,
+                                     delete=False) as f:
+        temporary_path = f.name
+        try:
+            f.write(content)
+            f.close()
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+
+def get_compute_credential_file_mounts():
+    configured, _, config = get_verda_configuration()
+    if not configured or config is None:
+        return {}
+    content = json.dumps(dataclasses.asdict(config), sort_keys=True)
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    path = os.path.expanduser(
+        f'{_GENERATED_S3_DIR}/compute/{digest}/config.json')
+    _write_private(path, content)
+    return {'~/.verda/config.json': path}
