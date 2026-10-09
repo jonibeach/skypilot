@@ -24,6 +24,7 @@ VERDA_S3_CREDENTIALS_PATH = '~/.verda/s3.credentials'
 VERDA_S3_CONFIG_PATH = '~/.verda/s3.config'
 _CLI_CREDENTIALS_PATH = '~/.verda/credentials'
 _GENERATED_S3_DIR = '~/.sky/generated/verda'
+# https://docs.verda.com/cli/object-storage/#configure-credentials
 DEFAULT_REGION = 'us-east-1'
 _DEFAULT_ENDPOINT = 'https://objects.fin-03.verda.storage'
 
@@ -810,6 +811,8 @@ def verda_s3_profile_in_config() -> bool:
                               f'[profile {VERDA_S3_PROFILE_NAME}]')
 
 
+# https://docs.verda.com/cli/object-storage/#configure-credentials
+# https://docs.verda.com/cli/object-storage/#environment-variables
 def _cli_s3_section():
     path = os.path.expanduser(_CLI_CREDENTIALS_PATH)
     if not os.path.isfile(path):

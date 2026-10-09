@@ -5299,6 +5299,18 @@ class VerdaStore(S3CompatibleStore):
             mount_cmd_factory=cls._get_verda_mount_cmd,
         )
 
+    def _get_bucket(self):
+        bucket = self.config.resource_factory(self.name)
+        if data_utils.verify_verda_bucket(self.name):
+            self._validate_existing_bucket()
+            return bucket, False
+        with ux_utils.print_exception_no_traceback():
+            raise exceptions.StorageBucketGetError(
+                f'Bucket {self.name!r} does not exist or is not accessible. '
+                'Verda Object Storage does not allow creating buckets through '
+                'its S3 API during the beta. Create the bucket in the Verda '
+                'console (Object Storage -> Create bucket) and try again.')
+
     @classmethod
     def _get_verda_mount_cmd(cls,
                              bucket_name: str,
