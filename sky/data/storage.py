@@ -76,6 +76,9 @@ STORE_ENABLED_CLOUDS: List[str] = [
     huggingface.NAME,
 ]
 
+# Verda's beta S3 API rejects CreateBucket with an empty 403, also from
+# Verda's own CLI. Verda support confirmed that buckets are created in the
+# console during the beta.
 NO_BUCKET_CREATION_CLOUDS: List[str] = [str(clouds.Verda())]
 
 # Maximum number of concurrent rsync upload processes
@@ -5285,6 +5288,8 @@ class VerdaStore(S3CompatibleStore):
     @classmethod
     def get_config(cls) -> S3CompatibleConfig:
         """Return the configuration for Verda Object Storage."""
+        # get_config runs for every registered store, including at import of
+        # this module, so it must not write credential files.
         credentials_path, config_path = verda.local_s3_files(write=False)
         return S3CompatibleConfig(
             store_type='VERDA',

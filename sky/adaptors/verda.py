@@ -951,6 +951,7 @@ def local_s3_files(write: bool = True):
               'endpoint_url = '
               f'{section.get("verda_s3_endpoint", _DEFAULT_ENDPOINT)}\n'
               f'region = {section.get("verda_s3_region", DEFAULT_REGION)}\n')
+    # One folder per set of keys, so profiles do not overwrite each other.
     digest = hashlib.sha256((credentials + config).encode()).hexdigest()
     directory = os.path.expanduser(f'{_GENERATED_S3_DIR}/s3/{digest}')
     credentials_path = os.path.join(directory, 's3.credentials')
