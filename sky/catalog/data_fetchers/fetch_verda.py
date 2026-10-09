@@ -190,10 +190,7 @@ def create_catalog(output_path: str) -> None:
         output_path: Path to output CSV file
     """
 
-    # Get authentication credentials
     client = verda.VerdaClient()
-
-    # Get OAuth token
     logger.info('Authenticating with Verda Cloud API...')
 
     # Fetch instance types
