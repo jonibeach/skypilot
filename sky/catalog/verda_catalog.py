@@ -4,30 +4,108 @@ This module loads the service catalog file and can be used to
 query instance types and pricing information for Verda Cloud.
 """
 
+import io
+import threading
+import time
 import typing
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
+from sky import sky_logging
+from sky.adaptors import common as adaptors_common
+from sky.adaptors import verda
 from sky.catalog import common
+from sky.catalog.data_fetchers import fetch_verda
 
 if typing.TYPE_CHECKING:
+    import pandas as pd
+
     from sky.clouds import cloud
+else:
+    pd = adaptors_common.LazyImport('pandas')
+
+logger = sky_logging.init_logger(__name__)
 
 # Verda Cloud has not set the update schedule for their catalog.
 # We pull the catalog every 7 hours to make sure we have the
 # latest information.
 _PULL_FREQUENCY_HOURS = 7
-_df = common.read_catalog('verda/vms.csv',
-                          pull_frequency_hours=_PULL_FREQUENCY_HOURS)
+_hosted_df = common.read_catalog('verda/vms.csv',
+                                 pull_frequency_hours=_PULL_FREQUENCY_HOURS)
+_OFFERINGS_TTL_SECONDS = 3600
+# Verda spot stock changes within minutes, while the hosted catalog refreshes
+# about every 7 hours.
+_AVAILABILITY_TTL_SECONDS = 60
+_RETRY_SECONDS = 60
+
+_lock = threading.Lock()
+_client = verda.VerdaClient()
+_cache: Dict[str, Tuple[float, Any]] = {}
+_refreshing: Set[str] = set()
+
+
+def _cached(key: str, ttl_seconds: int, fetch: Callable[[], Any],
+            fallback: Any):
+    with _lock:
+        expiry, value = _cache.get(key, (0, fallback))
+        if time.time() < expiry or key in _refreshing:
+            return value
+        _refreshing.add(key)
+    try:
+        value = fetch()
+        expiry = time.time() + ttl_seconds
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Failed to fetch the live Verda {key}: {e}')
+        expiry = time.time() + _RETRY_SECONDS
+    with _lock:
+        _cache[key] = (expiry, value)
+        _refreshing.discard(key)
+    return value
+
+
+def _fetch_offerings():
+    buffer = io.StringIO()
+    fetch_verda.write_catalog(buffer, _client.instance_types_get(),
+                              _client.locations_get())
+    buffer.seek(0)
+    return pd.read_csv(buffer)
+
+
+def _fetch_stock():
+    return {
+        is_spot: _client.instance_availability_get(is_spot)
+        for is_spot in (False, True)
+    }
+
+
+def _offerings_df():
+    return _cached('catalog', _OFFERINGS_TTL_SECONDS, _fetch_offerings,
+                   _hosted_df)
+
+
+def _stock_for_mode(use_spot: bool):
+    stock = _cached('availability', _AVAILABILITY_TTL_SECONDS, _fetch_stock, {
+        False: set(),
+        True: set()
+    })
+    return stock[use_spot]
+
+
+def _in_stock_regions(instance_type: str, use_spot: bool):
+    return {
+        region for type_, region in _stock_for_mode(use_spot)
+        if type_ == instance_type
+    }
 
 
 def instance_type_exists(instance_type: str) -> bool:
-    return common.instance_type_exists_impl(_df, instance_type)
+    return common.instance_type_exists_impl(_offerings_df(), instance_type)
 
 
 def validate_region_zone(
         region: Optional[str],
         zone: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    return common.validate_region_zone_impl('verda', _df, region, zone)
+    return common.validate_region_zone_impl('verda', _offerings_df(), region,
+                                            zone)
 
 
 def get_hourly_cost(instance_type: str,
@@ -35,13 +113,24 @@ def get_hourly_cost(instance_type: str,
                     region: Optional[str] = None,
                     zone: Optional[str] = None) -> float:
     """Returns the cost, or the cheapest cost among all zones for spot."""
-    return common.get_hourly_cost_impl(_df, instance_type, use_spot, region,
-                                       zone)
+    return common.get_hourly_cost_impl(_offerings_df(), instance_type, use_spot,
+                                       region, zone)
 
 
 def get_vcpus_mem_from_instance_type(
         instance_type: str) -> Tuple[Optional[float], Optional[float]]:
-    return common.get_vcpus_mem_from_instance_type_impl(_df, instance_type)
+    return common.get_vcpus_mem_from_instance_type_impl(_offerings_df(),
+                                                        instance_type)
+
+
+def _candidate_dfs(use_spot: bool):
+    offerings = _offerings_df()
+    price_column = 'SpotPrice' if use_spot else 'Price'
+    offerings = offerings.dropna(subset=[price_column])
+    stock = _stock_for_mode(use_spot)
+    in_stock = offerings.loc[[(row.InstanceType, row.Region) in stock
+                              for row in offerings.itertuples()]]
+    return in_stock, offerings
 
 
 def get_default_instance_type(
@@ -56,14 +145,18 @@ def get_default_instance_type(
     del disk_tier, local_disk  # Verda Cloud does not support disk tiers.
     # NOTE: After expanding catalog to multiple entries, you may
     # want to specify a default instance type or family.
-    return common.get_instance_type_for_cpus_mem_impl(_df, cpus, memory, region,
-                                                      zone, use_spot,
-                                                      max_hourly_cost)
+    for candidates in _candidate_dfs(use_spot):
+        instance_type = common.get_instance_type_for_cpus_mem_impl(
+            candidates, cpus, memory, region, zone, use_spot, max_hourly_cost)
+        if instance_type is not None:
+            return instance_type
+    return None
 
 
 def get_accelerators_from_instance_type(
         instance_type: str) -> Optional[Dict[str, Union[int, float]]]:
-    return common.get_accelerators_from_instance_type_impl(_df, instance_type)
+    return common.get_accelerators_from_instance_type_impl(
+        _offerings_df(), instance_type)
 
 
 def get_instance_type_for_accelerator(
@@ -79,22 +172,30 @@ def get_instance_type_for_accelerator(
 ) -> Tuple[Optional[List[str]], List[str]]:
     """Returns a list of instance types that have the given accelerator."""
     del local_disk  # Verda Cloud does not support local disk.
-    return common.get_instance_type_for_accelerator_impl(
-        df=_df,
-        acc_name=acc_name,
-        acc_count=acc_count,
-        cpus=cpus,
-        memory=memory,
-        use_spot=use_spot,
-        region=region,
-        zone=zone,
-        max_hourly_cost=max_hourly_cost)
+    result: Tuple[Optional[List[str]], List[str]] = ([], [])
+    for candidates in _candidate_dfs(use_spot):
+        result = common.get_instance_type_for_accelerator_impl(
+            df=candidates,
+            acc_name=acc_name,
+            acc_count=acc_count,
+            cpus=cpus,
+            memory=memory,
+            use_spot=use_spot,
+            region=region,
+            zone=zone,
+            max_hourly_cost=max_hourly_cost)
+        if result[0]:
+            return result
+    return result
 
 
 def get_region_zones_for_instance_type(instance_type: str,
                                        use_spot: bool) -> List['cloud.Region']:
-    df = _df[_df['InstanceType'] == instance_type]
-    return common.get_region_zones(df, use_spot)
+    df = _offerings_df()
+    regions = common.get_region_zones(df[df['InstanceType'] == instance_type],
+                                      use_spot)
+    in_stock = _in_stock_regions(instance_type, use_spot)
+    return sorted(regions, key=lambda region: region.name not in in_stock)
 
 
 def list_accelerators(
@@ -107,6 +208,7 @@ def list_accelerators(
         require_price: bool = True) -> Dict[str, List[common.InstanceTypeInfo]]:
     """Returns all instance types in Verda Cloud offering accelerators."""
     del require_price  # Unused.
-    return common.list_accelerators_impl('Verda', _df, gpus_only, name_filter,
-                                         region_filter, quantity_filter,
-                                         case_sensitive, all_regions)
+    return common.list_accelerators_impl('Verda', _offerings_df(), gpus_only,
+                                         name_filter, region_filter,
+                                         quantity_filter, case_sensitive,
+                                         all_regions)

@@ -184,6 +184,10 @@ def handle_error(response: requests.Response) -> None:
         raise VerdaException(code, message)
 
 
+# requests waits forever by default.
+_TIMEOUT_SECONDS = 30
+
+
 class _AuthenticationService:
     """A service for client authentication."""
 
@@ -218,7 +222,7 @@ class _AuthenticationService:
         response = requests.post(url,
                                  json=payload,
                                  headers=self.generate_headers(),
-                                 timeout=30)
+                                 timeout=_TIMEOUT_SECONDS)
         handle_error(response)
 
         auth_data = response.json()
@@ -255,7 +259,8 @@ class _AuthenticationService:
 
         response = requests.post(url,
                                  json=payload,
-                                 headers=self.generate_headers())
+                                 headers=self.generate_headers(),
+                                 timeout=_TIMEOUT_SECONDS)
 
         # if refresh token is also expired, authenticate again:
         if response.status_code == 401 or response.status_code == 400:
@@ -348,6 +353,7 @@ class _HTTPClient:
                                  json=body,
                                  headers=headers,
                                  params=params,
+                                 timeout=_TIMEOUT_SECONDS,
                                  **kwargs)
         handle_error(response)
 
@@ -385,6 +391,7 @@ class _HTTPClient:
                                 json=body,
                                 headers=headers,
                                 params=params,
+                                timeout=_TIMEOUT_SECONDS,
                                 **kwargs)
         handle_error(response)
 
@@ -415,7 +422,11 @@ class _HTTPClient:
         url = self._add_base_url(url)
         headers = self._generate_headers()
 
-        response = requests.get(url, params=params, headers=headers, **kwargs)
+        response = requests.get(url,
+                                params=params,
+                                headers=headers,
+                                timeout=_TIMEOUT_SECONDS,
+                                **kwargs)
         handle_error(response)
 
         return response
@@ -449,6 +460,7 @@ class _HTTPClient:
                                   json=body,
                                   headers=headers,
                                   params=params,
+                                  timeout=_TIMEOUT_SECONDS,
                                   **kwargs)
         handle_error(response)
 
@@ -486,6 +498,7 @@ class _HTTPClient:
                                    headers=headers,
                                    json=body,
                                    params=params,
+                                   timeout=_TIMEOUT_SECONDS,
                                    **kwargs)
         handle_error(response)
 
@@ -591,6 +604,32 @@ class VerdaClient:
             self.http_client = _HTTPClient()
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
+
+    # https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
+    def instance_types_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return self.http_client.get('/instance-types').json()
+
+    # https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
+    def locations_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return [
+            location['code']
+            for location in self.http_client.get('/locations').json()
+        ]
+
+    # https://api.verda.com/v1/docs#tag/instance-availability/GET/v1/instance-availability
+    def instance_availability_get(self, is_spot: bool):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        params = {'is_spot': 'true' if is_spot else 'false'}
+        response = self.http_client.get('/instance-availability',
+                                        params=params).json()
+        return {(instance_type, location['location_code'])
+                for location in response
+                for instance_type in location['availabilities']}
 
     def ssh_keys_get(self) -> List[SSHKey]:
         """Get all ssh keys."""
