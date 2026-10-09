@@ -640,6 +640,32 @@ class VerdaClient:
                                         params={'instance_type': instance_type})
         return [image['image_type'] for image in response.json()]
 
+    # https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
+    def instance_types_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return self.http_client.get('/instance-types').json()
+
+    # https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
+    def locations_get(self):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        return [
+            location['code']
+            for location in self.http_client.get('/locations').json()
+        ]
+
+    # https://api.verda.com/v1/docs#tag/instance-availability/GET/v1/instance-availability
+    def instance_availability_get(self, is_spot: bool):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        params = {'is_spot': 'true' if is_spot else 'false'}
+        response = self.http_client.get('/instance-availability',
+                                        params=params).json()
+        return {(instance_type, location['location_code'])
+                for location in response
+                for instance_type in location['availabilities']}
+
     def ssh_keys_get(self) -> List[SSHKey]:
         """Get all ssh keys."""
         if self.http_client is None:

@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import requests
 
@@ -48,6 +48,7 @@ def _get_oauth_token(base_url: str, client_id: str, client_secret: str) -> str:
     return token_data['access_token']
 
 
+# https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
 def _fetch_instance_types(base_url: str, token: str) -> List[Dict]:
     """Fetch all instance types from the API.
 
@@ -67,69 +68,15 @@ def _fetch_instance_types(base_url: str, token: str) -> List[Dict]:
     return response.json()
 
 
-def _fetch_instance_availability(base_url: str,
-                                 token: str,
-                                 is_spot: bool = False) -> List[Dict]:
-    """Fetch instance availability for different regions.
-
-    Args:
-        base_url: Base URL for the API
-        token: OAuth access token
-        is_spot: Whether to fetch spot availability (True) or on-demand (False)
-
-    Returns:
-        List[Dict]: Availability with location_code and availabilities
-    """
-    url = f'{base_url}/instance-availability'
+# https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
+def _fetch_locations(base_url: str, token: str) -> List[str]:
+    url = f'{base_url}/locations'
     headers = {'Authorization': f'Bearer {token}'}
-    params = {'is_spot': 'true' if is_spot else 'false'}
 
-    response = requests.get(url, headers=headers, params=params, timeout=30)
+    response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
 
-    return response.json()
-
-
-def _build_availability_map(
-        base_url: str, token: str) -> Dict[str, Dict[str, Tuple[bool, bool]]]:
-    """Build a map of instance types to regions and their availability."""
-    availability_map: Dict[str, Dict[str, Tuple[bool, bool]]] = {}
-
-    # Fetch on-demand availability
-    on_demand_availability = _fetch_instance_availability(base_url,
-                                                          token,
-                                                          is_spot=False)
-    for location_data in on_demand_availability:
-        location_code = location_data.get('location_code', '')
-        availabilities = location_data.get('availabilities', [])
-        for instance_type in availabilities:
-            if instance_type not in availability_map:
-                availability_map[instance_type] = {}
-            if location_code not in availability_map[instance_type]:
-                availability_map[instance_type][location_code] = (False, False)
-            availability_map[instance_type][location_code] = (
-                True,
-                availability_map[instance_type][location_code][1],
-            )
-
-    # Fetch spot availability
-    spot_availability = _fetch_instance_availability(base_url,
-                                                     token,
-                                                     is_spot=True)
-    for location_data in spot_availability:
-        location_code = location_data.get('location_code', '')
-        availabilities = location_data.get('availabilities', [])
-        for instance_type in availabilities:
-            if instance_type not in availability_map:
-                availability_map[instance_type] = {}
-            if location_code not in availability_map[instance_type]:
-                availability_map[instance_type][location_code] = (False, False)
-            availability_map[instance_type][location_code] = (
-                availability_map[instance_type][location_code][0],
-                True,
-            )
-
-    return availability_map
+    return [location['code'] for location in response.json()]
 
 
 def _extract_gpu_model(instance: Dict) -> str:
@@ -188,7 +135,7 @@ def _format_accelerator_name(gpu_model: str, gpu_memory_gb: float) -> str:
             raise ValueError(f'Unsupported A100 memory: {gpu_memory_gb}')
 
     if gpu_model != accelerator_name:
-        print(f'Accelerator name: {gpu_model} -> {accelerator_name}')
+        logger.debug(f'Accelerator name: {gpu_model} -> {accelerator_name}')
     return accelerator_name
 
 
@@ -221,6 +168,78 @@ def _build_gpu_info(accelerator_name: str, num_gpus: int,
     }
     # Convert to JSON string (csv.writer will handle proper escaping)
     return json.dumps(gpu_info_dict)
+
+
+def write_catalog(f, instance_types: List[Dict], locations: List[str]):
+    writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
+
+    # Write header
+    writer.writerow([
+        'InstanceType',
+        'UpstreamCloudId',
+        'vCPUs',
+        'MemoryGiB',
+        'AcceleratorName',
+        'AcceleratorCount',
+        'GpuInfo',
+        'Region',
+        'Price',
+        'SpotPrice',
+    ])
+
+    for instance in instance_types:
+        try:
+            # Extract data from instance dictionary
+            instance_type_id = instance.get('instance_type', '')
+            cpu_data = instance.get('cpu', {})
+            memory_data = instance.get('memory', {})
+            gpu_data = instance.get('gpu', {})
+            gpu_memory_data = instance.get('gpu_memory', {})
+
+            vcpus = (float(cpu_data.get('number_of_cores', 0))
+                     if cpu_data else 0)
+            memory_gib = (float(memory_data.get('size_in_gigabytes', 0))
+                          if memory_data else 0)
+            price = float(instance.get('price_per_hour', 0))
+            # Get spot price if available
+            spot_price_raw = instance.get('spot_price') or instance.get(
+                'spot_price_per_hour')
+            spot_price = float(spot_price_raw) if spot_price_raw else ''
+
+            # GPU information
+            num_gpus = gpu_data.get('number_of_gpus', 0) if gpu_data else 0
+            gpu_memory_gb = (gpu_memory_data.get('size_in_gigabytes', 0)
+                             if gpu_memory_data else 0)
+
+            # Extract and format GPU model
+            if num_gpus > 0:
+                gpu_model = _extract_gpu_model(instance)
+                accelerator_name = _format_accelerator_name(
+                    gpu_model, int(gpu_memory_gb / num_gpus))
+                gpu_info = _build_gpu_info(accelerator_name, num_gpus,
+                                           gpu_memory_gb)
+            else:
+                accelerator_name = ''
+                gpu_info = ''
+
+            for region in locations:
+                writer.writerow([
+                    instance_type_id,
+                    instance_type_id,
+                    vcpus,
+                    memory_gib,
+                    accelerator_name,
+                    float(num_gpus) if num_gpus > 0 else '',
+                    gpu_info,
+                    region,
+                    price,
+                    spot_price,
+                ])
+        except Exception as e:  # pylint: disable=broad-except
+            instance_type_id = instance.get('instance_type', 'unknown')
+            logger.warning(
+                f'Error processing instance type {instance_type_id}: {e}')
+            continue
 
 
 def create_catalog(output_path: str) -> None:
@@ -264,11 +283,9 @@ def create_catalog(output_path: str) -> None:
     instance_types = _fetch_instance_types(base_url, token)
     logger.info(f'Fetched {len(instance_types)} instance types')
 
-    # Fetch availability information
-    logger.info('Fetching instance availability...')
-    availability_map = _build_availability_map(base_url, token)
-    logger.info(
-        f'Fetched availability for {len(availability_map)} instance types')
+    logger.info('Fetching locations...')
+    locations = _fetch_locations(base_url, token)
+    logger.info(f'Fetched {len(locations)} locations')
 
     # Create output directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -276,89 +293,7 @@ def create_catalog(output_path: str) -> None:
     # Create CSV file
     logger.info(f'Writing catalog to {output_path}')
     with open(output_path, 'w', encoding='utf-8') as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
-
-        # Write header
-        writer.writerow([
-            'InstanceType',
-            'UpstreamCloudId',
-            'vCPUs',
-            'MemoryGiB',
-            'AcceleratorName',
-            'AcceleratorCount',
-            'GpuInfo',
-            'Region',
-            'Price',
-            'SpotPrice',
-        ])
-
-        for instance in instance_types:
-            try:
-                # Extract data from instance dictionary
-                instance_type_id = instance.get('instance_type', '')
-                cpu_data = instance.get('cpu', {})
-                memory_data = instance.get('memory', {})
-                gpu_data = instance.get('gpu', {})
-                gpu_memory_data = instance.get('gpu_memory', {})
-
-                vcpus = (float(cpu_data.get('number_of_cores', 0))
-                         if cpu_data else 0)
-                memory_gib = (float(memory_data.get('size_in_gigabytes', 0))
-                              if memory_data else 0)
-                price = float(instance.get('price_per_hour', 0))
-                # Get spot price if available, otherwise use regular price
-                spot_price_raw = instance.get('spot_price') or instance.get(
-                    'spot_price_per_hour')
-                spot_price = float(spot_price_raw) if spot_price_raw else price
-
-                # GPU information
-                num_gpus = gpu_data.get('number_of_gpus', 0) if gpu_data else 0
-                gpu_memory_gb = (gpu_memory_data.get('size_in_gigabytes', 0)
-                                 if gpu_memory_data else 0)
-
-                # Extract and format GPU model
-                if num_gpus > 0:
-                    gpu_model = _extract_gpu_model(instance)
-                    accelerator_name = _format_accelerator_name(
-                        gpu_model, int(gpu_memory_gb / num_gpus))
-                    gpu_info = _build_gpu_info(accelerator_name, num_gpus,
-                                               gpu_memory_gb)
-                else:
-                    accelerator_name = ''
-                    gpu_info = ''
-
-                # Get available regions for this instance type
-                available_regions = availability_map.get(instance_type_id, {})
-
-                # Only include regions reported by the availability API
-                if not available_regions:
-                    continue
-
-                # Write row(s) for each available region
-                for region, availability_tuple in available_regions.items():
-                    on_demand_available, spot_available = availability_tuple
-
-                    effective_price = price if on_demand_available else ''
-                    effective_spot_price = (spot_price
-                                            if spot_available else '')
-
-                    writer.writerow([
-                        instance_type_id,
-                        instance_type_id,
-                        vcpus,
-                        memory_gib,
-                        accelerator_name,
-                        float(num_gpus) if num_gpus > 0 else '',
-                        gpu_info,
-                        region,
-                        effective_price,
-                        effective_spot_price,
-                    ])
-            except Exception as e:  # pylint: disable=broad-except
-                instance_type_id = instance.get('instance_type', 'unknown')
-                logger.warning(
-                    f'Error processing instance type {instance_type_id}: {e}')
-                continue
+        write_catalog(f, instance_types, locations)
 
     logger.info(f'Verda catalog saved to {output_path}')
     logger.info(f'Processed {len(instance_types)} instance types')
