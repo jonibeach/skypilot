@@ -534,6 +534,7 @@ class _HTTPClient:
         return self._base_url + url
 
 
+# https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
 class InstanceStatus:
     """Instance status."""
 
@@ -564,6 +565,7 @@ class Instance:
         self.hostname = data['hostname']
         # For not yet provisioned instances, ip is not available
         self.ip = data.get('ip')
+        # https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
         self.os_volume_id = data.get('os_volume_id')
 
 
@@ -601,6 +603,7 @@ class VerdaClient:
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
 
+    # https://api.verda.com/v1/docs#tag/os-images/GET/v1/images
     def images_get(self, instance_type: str):
         if self.http_client is None:
             self.http_client = _HTTPClient()
@@ -638,6 +641,8 @@ class VerdaClient:
             self.http_client = _HTTPClient()
         payload: Dict[str, Any] = {'id': [instance_id], 'action': action}
         if volume_ids:
+            # https://api.verda.com/v1/docs#tag/instances/PUT/v1/instances
+            # https://api.verda.com/v1/docs#description/2026-02-03-delete-volumes-permanently-when-deleting-an-instance
             payload['volume_ids'] = volume_ids
             payload['delete_permanently'] = True
         self.http_client.put('/instances', body=payload)

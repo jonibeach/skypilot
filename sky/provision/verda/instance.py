@@ -30,6 +30,7 @@ SSH_CONN_RETRY_INTERVAL_SECONDS = 10
 
 verda = VerdaClient()
 
+# https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
 _PENDING_STATUSES = [
     InstanceStatus.NEW,
     InstanceStatus.ORDERED,
@@ -99,6 +100,7 @@ def _get_head_instance_id(instances: Dict[str, Instance]) -> Optional[str]:
     return head_instance_id
 
 
+# https://api.verda.com/v1/docs#tag/os-images/GET/v1/images
 def _fallback_image(instance_type: str):
     images = verda.images_get(instance_type)
     candidates = ([
@@ -207,12 +209,15 @@ def run_instances(
                     'size': disk_size,
                 }
             }
+            # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
+            # https://api.verda.com/v1/docs#description/2026-02-03-spot-instance-volume-policy
             if is_spot:
                 instance_data['os_volume'][
                     'on_spot_discontinue'] = 'delete_permanently'
             try:
                 response = verda.instance_create(instance_data)
             except VerdaException as e:
+                # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
                 if (image != VERDA_DEFAULT_IMAGE or
                         'Operating system is not valid' not in e.message):
                     raise
