@@ -294,6 +294,28 @@ def get_vastdata_mount_cmd(vastdata_credentials_path: str,
                                         read_only=read_only)
 
 
+def get_verda_mount_cmd(verda_credentials_path: str,
+                        verda_profile_name: str,
+                        bucket_name: str,
+                        endpoint_url: str,
+                        mount_path: str,
+                        region: Optional[str] = None,
+                        _bucket_sub_path: Optional[str] = None,
+                        read_only: bool = False) -> str:
+    """Returns a command to mount a Verda object storage bucket."""
+    cred_env = (f'AWS_SHARED_CREDENTIALS_FILE={verda_credentials_path} '
+                f'AWS_PROFILE={verda_profile_name}')
+    return _get_s3_compatible_mount_cmd(
+        bucket_name=bucket_name,
+        mount_path=mount_path,
+        _bucket_sub_path=_bucket_sub_path,
+        endpoint_url=endpoint_url,
+        region=region,
+        cred_env=cred_env,
+        rclone_extra_flags='--s3-force-path-style=true',
+        read_only=read_only)
+
+
 def get_gcs_mount_install_cmd() -> str:
     """Returns a command to install GCS mount utility gcsfuse."""
     install_cmd = ('ARCH=$(uname -m) && '
