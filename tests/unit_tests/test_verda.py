@@ -30,7 +30,7 @@ def test_verda_credential_file_mounts(monkeypatch, tmp_path):
                                               'FIN-03')
     monkeypatch.setattr(verda_adaptor, 'get_verda_configuration', lambda:
                         (True, None, config))
-    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_DIR', str(tmp_path))
     mounts = verda.Verda().get_credential_file_mounts()
     path = Path(mounts['~/.verda/config.json'])
     assert json.loads(path.read_text())['client_secret'] == 'secret'
@@ -325,7 +325,7 @@ def test_environment_credentials_reach_remote(monkeypatch, tmp_path, prefix):
     monkeypatch.setenv(f'{prefix}_CLIENT_SECRET', 'env-secret')
     monkeypatch.setenv(f'{prefix}_BASE_URL', 'https://example.invalid/v1')
     monkeypatch.setenv(f'{prefix}_DEFAULT_REGION', 'FIN-03')
-    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_DIR', str(tmp_path))
     mounts = verda.Verda().get_credential_file_mounts()
     config = json.loads(Path(mounts['~/.verda/config.json']).read_text())
     assert config == dict(client_id='env-id',
@@ -413,3 +413,30 @@ def test_custom_image_failure_does_not_trigger_fallback(monkeypatch):
         verda_instance.run_instances('FIN-03', 'cluster', 'cluster', config)
     fallback.assert_not_called()
     create.assert_called_once()
+
+
+def test_fallback_image_is_reused_for_every_node(monkeypatch):
+    head = Instance(dict(id='head', hostname='cluster-head', status='running'))
+    worker = Instance(
+        dict(id='worker', hostname='cluster-worker', status='running'))
+    create = MagicMock(side_effect=[
+        verda_adaptor.VerdaException(
+            'invalid_request',
+            'Operating system is not valid for this instance type'), head,
+        worker
+    ])
+    monkeypatch.setattr(verda_instance.verda, 'instance_create', create)
+    monkeypatch.setattr(
+        verda_instance.verda, 'instances_get', lambda: [head, worker]
+        if create.call_count == 3 else [])
+    monkeypatch.setattr(verda_instance, 'find_ssh_key_id', lambda _: 'key')
+    fallback = MagicMock(return_value='24.04.cuda13.2.docker')
+    monkeypatch.setattr(verda_instance, '_fallback_image', fallback)
+    config = MagicMock(count=2,
+                       node_config={
+                           'InstanceType': 'gpu',
+                           'PublicKey': 'public-key'
+                       })
+    verda_instance.run_instances('FIN-03', 'cluster', 'cluster', config)
+    fallback.assert_called_once_with('gpu')
+    assert create.call_args.args[0]['image'] == '24.04.cuda13.2.docker'

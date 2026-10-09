@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-_GENERATED_S3_DIR = '~/.sky/generated/verda'
+_GENERATED_DIR = '~/.sky/generated/verda'
 
 
 @dataclasses.dataclass
@@ -685,7 +685,6 @@ def get_compute_credential_file_mounts():
         return {}
     content = json.dumps(dataclasses.asdict(config), sort_keys=True)
     digest = hashlib.sha256(content.encode()).hexdigest()
-    path = os.path.expanduser(
-        f'{_GENERATED_S3_DIR}/compute/{digest}/config.json')
+    path = os.path.expanduser(f'{_GENERATED_DIR}/compute/{digest}/config.json')
     _write_private(path, content)
     return {'~/.verda/config.json': path}
