@@ -6019,6 +6019,8 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                     # For SkyServe controllers on Kubernetes: override autostop
                     # behavior to force autodown (instead of no-op)
                     # to avoid dangling controllers.
+                    # Verda cannot stop instances, so any controller there is
+                    # torn down when idle rather than left running and billing.
 
                     # down = False is the default, but warn the user in case
                     # they have explicitly specified it.

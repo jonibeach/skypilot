@@ -55,6 +55,7 @@ _STATUS_MAP = {
     InstanceStatus.NO_CAPACITY: status_lib.ClusterStatus.INIT,
     InstanceStatus.INSTALLATION_FAILED: status_lib.ClusterStatus.INIT,
     InstanceStatus.RUNNING: status_lib.ClusterStatus.UP,
+    # Shut down but not deleted. Verda keeps billing for it.
     InstanceStatus.OFFLINE: status_lib.ClusterStatus.STOPPED,
     InstanceStatus.STARTING_HIBERNATION: status_lib.ClusterStatus.STOPPED,
     InstanceStatus.HIBERNATING: status_lib.ClusterStatus.STOPPED,
@@ -102,6 +103,11 @@ def _get_head_instance_id(instances: Dict[str, Instance]) -> Optional[str]:
 
 # https://api.verda.com/v1/docs#tag/os-images/GET/v1/images
 def _fallback_image(instance_type: str):
+    # /images lists the newest CUDA image first. Some types have no CUDA
+    # image at all (1V100.6V only has 24.04.base, jupyter and 26.04.base), and
+    # jupyter is then the only image with NVIDIA drivers. The
+    # ubuntu-24.04-cuda-* names match the style of VERDA_DEFAULT_IMAGE, in
+    # case /images returns them.
     images = verda.images_get(instance_type)
     candidates = ([
         i for i in images
@@ -210,6 +216,8 @@ def run_instances(
             }
             # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
             # https://api.verda.com/v1/docs#description/2026-02-03-spot-instance-volume-policy
+            # The default, keep_detached, leaves the OS volume billing after
+            # Verda evicts a spot instance.
             if is_spot:
                 instance_data['os_volume'][
                     'on_spot_discontinue'] = 'delete_permanently'
@@ -217,6 +225,10 @@ def run_instances(
                 response = verda.instance_create(instance_data)
             except VerdaException as e:
                 # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
+                # The default image uses NVIDIA's open kernel modules, which
+                # need a Turing or newer GPU, so Verda rejects it on V100 with
+                # "Operating system is not valid for this instance type". The
+                # API docs do not list this message.
                 if (image != VERDA_DEFAULT_IMAGE or
                         'Operating system is not valid' not in e.message):
                     raise
@@ -380,6 +392,8 @@ def terminate_instances(
         if worker_only and inst.hostname.endswith('-head'):
             continue
         try:
+            # Without volume_ids, the OS volume survives detached and keeps
+            # billing. Verda removes it a few minutes after the instance.
             verda.instance_action(
                 instance_id=instance_id,
                 action='delete',
