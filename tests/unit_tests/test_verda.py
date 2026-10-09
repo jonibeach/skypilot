@@ -346,10 +346,8 @@ def test_preferred_store_errors_when_only_verda(monkeypatch):
 
 @pytest.fixture
 def live_catalog(monkeypatch):
-    monkeypatch.setattr(verda_catalog, '_offerings', None)
-    monkeypatch.setattr(verda_catalog, '_in_stock', None)
-    monkeypatch.setattr(verda_catalog.verda, 'get_verda_configuration', lambda:
-                        (True, None, None))
+    monkeypatch.setattr(verda_catalog, '_cache', {})
+    monkeypatch.setattr(verda_catalog, '_refreshing', set())
     client = MagicMock()
     monkeypatch.setattr(verda_catalog, '_client', client)
     return client
@@ -539,7 +537,7 @@ def test_cpu_selection_falls_back_when_stock_unknown(monkeypatch, live_catalog):
 
 def test_failed_refresh_keeps_last_good_catalog(monkeypatch, live_catalog):
     offerings = pd.DataFrame({'InstanceType': ['live-only']})
-    monkeypatch.setattr(verda_catalog, '_offerings', (0, offerings))
+    monkeypatch.setattr(verda_catalog, '_cache', {'catalog': (0, offerings)})
     fetch = MagicMock(side_effect=RuntimeError('offline'))
     monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
     assert verda_catalog._offerings_df() is offerings
@@ -670,3 +668,23 @@ def test_fallback_image_is_reused_for_every_node(monkeypatch):
 def test_endpoint_lookup_does_not_write_credentials(cli_storage_credentials):
     assert verda_adaptor.get_endpoint() == 'https://objects.example.invalid'
     assert not cli_storage_credentials.exists()
+
+
+def test_catalog_fetch_runs_without_the_lock(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({'InstanceType': ['live-only']})
+
+    def fetch():
+        assert not verda_catalog._lock.locked()
+        assert verda_catalog._offerings_df() is verda_catalog._hosted_df
+        return offerings
+
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
+    assert verda_catalog._offerings_df() is offerings
+
+
+def test_catalog_falls_back_without_credentials(monkeypatch, live_catalog):
+    error = RuntimeError('Can\'t connect to Verda Cloud')
+    live_catalog.instance_types_get.side_effect = error
+    live_catalog.instance_availability_get.side_effect = error
+    assert verda_catalog._offerings_df() is verda_catalog._hosted_df
+    assert not verda_catalog._in_stock_regions('T', False)

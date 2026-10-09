@@ -8,7 +8,7 @@ import io
 import threading
 import time
 import typing
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from sky import sky_logging
 from sky.adaptors import common as adaptors_common
@@ -39,12 +39,27 @@ _RETRY_SECONDS = 60
 
 _lock = threading.Lock()
 _client = verda.VerdaClient()
-_offerings: Optional[Tuple[float, 'pd.DataFrame']] = None
-_in_stock: Optional[Tuple[float, Dict[bool, Set[Tuple[str, str]]]]] = None
+_cache: Dict[str, Tuple[float, Any]] = {}
+_refreshing: Set[str] = set()
 
 
-def _is_fresh(cached):
-    return cached is not None and time.time() < cached[0]
+def _cached(key: str, ttl_seconds: int, fetch: Callable[[], Any],
+            fallback: Any):
+    with _lock:
+        expiry, value = _cache.get(key, (0, fallback))
+        if time.time() < expiry or key in _refreshing:
+            return value
+        _refreshing.add(key)
+    try:
+        value = fetch()
+        expiry = time.time() + ttl_seconds
+    except Exception as e:  # pylint: disable=broad-except
+        logger.debug(f'Failed to fetch the live Verda {key}: {e}')
+        expiry = time.time() + _RETRY_SECONDS
+    with _lock:
+        _cache[key] = (expiry, value)
+        _refreshing.discard(key)
+    return value
 
 
 def _fetch_offerings():
@@ -55,41 +70,24 @@ def _fetch_offerings():
     return pd.read_csv(buffer)
 
 
+def _fetch_stock():
+    return {
+        is_spot: _client.instance_availability_get(is_spot)
+        for is_spot in (False, True)
+    }
+
+
 def _offerings_df():
-    global _offerings
-    if not verda.get_verda_configuration()[0]:
-        return _hosted_df
-    with _lock:
-        if not _is_fresh(_offerings):
-            try:
-                offerings = _fetch_offerings()
-                _offerings = (time.time() + _OFFERINGS_TTL_SECONDS, offerings)
-            except Exception as e:  # pylint: disable=broad-except
-                logger.debug(f'Failed to fetch the live Verda catalog: {e}')
-                _, cached = _offerings or (0, _hosted_df)
-                _offerings = (time.time() + _RETRY_SECONDS, cached)
-        assert _offerings is not None
-        return _offerings[1]
+    return _cached('catalog', _OFFERINGS_TTL_SECONDS, _fetch_offerings,
+                   _hosted_df)
 
 
 def _stock_for_mode(use_spot: bool):
-    global _in_stock
-    if not verda.get_verda_configuration()[0]:
-        return set()
-    with _lock:
-        if not _is_fresh(_in_stock):
-            try:
-                stock = {
-                    is_spot: _client.instance_availability_get(is_spot)
-                    for is_spot in (False, True)
-                }
-                _in_stock = (time.time() + _AVAILABILITY_TTL_SECONDS, stock)
-            except Exception as e:  # pylint: disable=broad-except
-                logger.debug(f'Failed to fetch Verda availability: {e}')
-                _, cached = _in_stock or (0, {False: set(), True: set()})
-                _in_stock = (time.time() + _RETRY_SECONDS, cached)
-        assert _in_stock is not None
-        return _in_stock[1][use_spot]
+    stock = _cached('availability', _AVAILABILITY_TTL_SECONDS, _fetch_stock, {
+        False: set(),
+        True: set()
+    })
+    return stock[use_spot]
 
 
 def _in_stock_regions(instance_type: str, use_spot: bool):
