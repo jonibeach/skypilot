@@ -5,12 +5,14 @@ import tempfile
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from sky import clouds
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
+from sky.catalog import verda_catalog
 from sky.clouds import verda
 
 
@@ -310,3 +312,119 @@ class TestVerdaClientInstanceCreation:
             client.instance_create({})
 
         assert "Can't connect to Verda Cloud" in str(exc_info.value)
+
+
+@pytest.fixture
+def live_catalog(monkeypatch):
+    monkeypatch.setattr(verda_catalog, '_offerings', None)
+    monkeypatch.setattr(verda_catalog, '_in_stock', None)
+    monkeypatch.setattr(verda_catalog.verda, 'get_verda_configuration', lambda:
+                        (True, None, None))
+    client = MagicMock()
+    monkeypatch.setattr(verda_catalog, '_client', client)
+    return client
+
+
+def test_catalog_lists_in_stock_regions_first(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['T', 'T'],
+        'Region': ['FIN-01', 'FIN-03'],
+        'Price': [1.0, 1.0],
+        'SpotPrice': [None, None],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = (
+        lambda is_spot: set() if is_spot else {('T', 'FIN-03')})
+    regions = verda_catalog.get_region_zones_for_instance_type('T', False)
+    assert [region.name for region in regions] == ['FIN-03', 'FIN-01']
+
+
+def test_catalog_caches_failed_fetches(monkeypatch, live_catalog):
+    fetch = MagicMock(side_effect=RuntimeError('down'))
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
+    live_catalog.instance_availability_get.side_effect = RuntimeError('down')
+    for _ in range(2):
+        assert verda_catalog._offerings_df() is verda_catalog._hosted_df
+        assert not verda_catalog._in_stock_regions('T', False)
+    assert fetch.call_count == 1
+    assert live_catalog.instance_availability_get.call_count == 1
+
+
+def test_spot_cpu_selection_prefers_available_type(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cheap', 'available'],
+        'Region': ['FIN-03', 'FIN-03'],
+        'vCPUs': [4, 4],
+        'MemoryGiB': [16, 16],
+        'Price': [0.1, 0.2],
+        'SpotPrice': [0.02, 0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = (
+        lambda is_spot: {('available', 'FIN-03')}
+        if is_spot else {('cheap', 'FIN-03')})
+    assert verda_catalog.get_default_instance_type(use_spot=True) == 'available'
+
+
+def test_cpu_selection_falls_back_when_stock_unknown(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cpu'],
+        'Region': ['FIN-03'],
+        'vCPUs': [4],
+        'MemoryGiB': [16],
+        'Price': [0.1],
+        'SpotPrice': [0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = RuntimeError('offline')
+    assert verda_catalog.get_default_instance_type(use_spot=True) == 'cpu'
+
+
+def test_failed_refresh_keeps_last_good_catalog(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({'InstanceType': ['live-only']})
+    monkeypatch.setattr(verda_catalog, '_offerings', (0, offerings))
+    fetch = MagicMock(side_effect=RuntimeError('offline'))
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
+    assert verda_catalog._offerings_df() is offerings
+    assert verda_catalog._offerings_df() is offerings
+    fetch.assert_called_once()
+
+
+def test_cpu_selection_returns_none_without_spot_prices(monkeypatch,
+                                                        live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cpu'],
+        'Region': ['FIN-03'],
+        'vCPUs': [4],
+        'MemoryGiB': [16],
+        'Price': [0.1],
+        'SpotPrice': [None],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.return_value = set()
+    assert verda_catalog.get_default_instance_type(use_spot=True) is None
+
+
+@pytest.mark.parametrize('available,expected',
+                         [({'available'}, ['available']),
+                          (set(), ['cheap', 'available'])])
+def test_gpu_selection_prefers_stock_with_fallback(monkeypatch, live_catalog,
+                                                   available, expected):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cheap', 'available'],
+        'Region': ['FIN-03', 'FIN-03'],
+        'vCPUs': [4, 4],
+        'MemoryGiB': [16, 16],
+        'AcceleratorName': ['H100', 'H100'],
+        'AcceleratorCount': [1, 1],
+        'Price': [0.1, 0.2],
+        'SpotPrice': [0.02, 0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.return_value = {
+        (name, 'FIN-03') for name in available
+    }
+    matches, _ = verda_catalog.get_instance_type_for_accelerator('H100',
+                                                                 1,
+                                                                 use_spot=True)
+    assert matches == expected

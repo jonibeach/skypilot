@@ -184,6 +184,9 @@ def handle_error(response: requests.Response) -> None:
         raise VerdaException(code, message)
 
 
+_TIMEOUT_SECONDS = 30
+
+
 class _AuthenticationService:
     """A service for client authentication."""
 
@@ -218,7 +221,7 @@ class _AuthenticationService:
         response = requests.post(url,
                                  json=payload,
                                  headers=self.generate_headers(),
-                                 timeout=30)
+                                 timeout=_TIMEOUT_SECONDS)
         handle_error(response)
 
         auth_data = response.json()
@@ -255,7 +258,8 @@ class _AuthenticationService:
 
         response = requests.post(url,
                                  json=payload,
-                                 headers=self.generate_headers())
+                                 headers=self.generate_headers(),
+                                 timeout=_TIMEOUT_SECONDS)
 
         # if refresh token is also expired, authenticate again:
         if response.status_code == 401 or response.status_code == 400:
@@ -348,6 +352,7 @@ class _HTTPClient:
                                  json=body,
                                  headers=headers,
                                  params=params,
+                                 timeout=_TIMEOUT_SECONDS,
                                  **kwargs)
         handle_error(response)
 
@@ -385,6 +390,7 @@ class _HTTPClient:
                                 json=body,
                                 headers=headers,
                                 params=params,
+                                timeout=_TIMEOUT_SECONDS,
                                 **kwargs)
         handle_error(response)
 
@@ -415,7 +421,11 @@ class _HTTPClient:
         url = self._add_base_url(url)
         headers = self._generate_headers()
 
-        response = requests.get(url, params=params, headers=headers, **kwargs)
+        response = requests.get(url,
+                                params=params,
+                                headers=headers,
+                                timeout=_TIMEOUT_SECONDS,
+                                **kwargs)
         handle_error(response)
 
         return response
@@ -449,6 +459,7 @@ class _HTTPClient:
                                   json=body,
                                   headers=headers,
                                   params=params,
+                                  timeout=_TIMEOUT_SECONDS,
                                   **kwargs)
         handle_error(response)
 
@@ -486,6 +497,7 @@ class _HTTPClient:
                                    headers=headers,
                                    json=body,
                                    params=params,
+                                   timeout=_TIMEOUT_SECONDS,
                                    **kwargs)
         handle_error(response)
 
