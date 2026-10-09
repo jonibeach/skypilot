@@ -1,6 +1,8 @@
 """Tests for Verda Cloud provider."""
 
+import concurrent.futures
 from pathlib import Path
+import stat
 import tempfile
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -8,10 +10,14 @@ from unittest.mock import patch
 import pytest
 
 from sky import clouds
+from sky import exceptions
+from sky import task as task_lib
+from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
 from sky.clouds import verda
+from sky.data import storage as storage_lib
 
 
 def test_verda_cloud_basics():
@@ -27,10 +33,11 @@ def test_verda_credential_file_mounts():
         cred_path.touch()
         with pytest.MonkeyPatch.context() as m:
             m.setattr(verda.Verda, "CREDENTIALS_PATH", str(cred_path))
+            m.setattr(verda_adaptor, "get_s3_credential_file_mounts",
+                      lambda: {})
             cloud = verda.Verda()
             mounts = cloud.get_credential_file_mounts()
-            assert str(cred_path) in mounts
-            assert mounts[str(cred_path)] == "~/.verda/config.json"
+            assert mounts["~/.verda/config.json"] == str(cred_path)
 
 
 def test_verda_region_zone_validation_disallows_zones():
@@ -310,3 +317,114 @@ class TestVerdaClientInstanceCreation:
             client.instance_create({})
 
         assert "Can't connect to Verda Cloud" in str(exc_info.value)
+
+
+def _enable_storage_clouds(monkeypatch, names):
+    monkeypatch.setattr(storage_lib,
+                        'get_cached_enabled_storage_cloud_names_or_refresh',
+                        lambda raise_if_no_cloud_access=False: names)
+
+
+def test_preferred_store_skips_verda(monkeypatch):
+    _enable_storage_clouds(monkeypatch, ['Verda', 'AWS'])
+    task = task_lib.Task(run='echo hi')
+    task.best_resources = MagicMock(cloud=verda.Verda(), region='FIN-01')
+    assert task._get_preferred_store() == (storage_lib.StoreType.S3, None)
+
+
+def test_preferred_store_errors_when_only_verda(monkeypatch):
+    _enable_storage_clouds(monkeypatch, ['Verda'])
+    task = task_lib.Task(run='echo hi')
+    task.best_resources = MagicMock(cloud=verda.Verda(), region='FIN-01')
+    with pytest.raises(exceptions.NoCloudAccessError):
+        task._get_preferred_store()
+
+
+@pytest.fixture
+def cli_storage_credentials(monkeypatch, tmp_path):
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR',
+                        str(tmp_path / 'generated'))
+    monkeypatch.setattr(verda_adaptor, 'VERDA_S3_CREDENTIALS_PATH',
+                        str(tmp_path / 's3.credentials'))
+    monkeypatch.setattr(verda_adaptor, 'VERDA_S3_CONFIG_PATH',
+                        str(tmp_path / 's3.config'))
+    monkeypatch.setattr(
+        verda_adaptor, '_cli_s3_section', lambda: {
+            'verda_s3_access_key': 'test-access',
+            'verda_s3_secret_key': 'test-secret',
+            'verda_s3_endpoint': 'https://objects.example.invalid',
+        })
+    return tmp_path / 'generated'
+
+
+def test_storage_registration_does_not_write_credentials(
+        cli_storage_credentials):
+    storage_lib.register_s3_compatible_store(storage_lib.VerdaStore)
+    assert storage_lib.StoreType.VERDA.store_prefix() == 'verda://'
+    assert not cli_storage_credentials.exists()
+
+
+def test_storage_initialization_prepares_cli_files(monkeypatch,
+                                                   cli_storage_credentials):
+    store = storage_lib.VerdaStore.__new__(storage_lib.VerdaStore)
+    store.config = storage_lib.VerdaStore.get_config()
+
+    def initialize(self):
+        assert 'test-access' in Path(self.config.credentials_file).read_text()
+        assert 'objects.example.invalid' in Path(
+            self.config.config_file).read_text()
+
+    monkeypatch.setattr(storage_lib.S3CompatibleStore, 'initialize', initialize)
+    store.initialize()
+
+
+def test_generated_storage_credentials_are_private(cli_storage_credentials):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        paths = list(
+            pool.map(lambda _: verda_adaptor.local_s3_files(), range(20)))
+    assert len(set(paths)) == 1
+    for path in paths[0]:
+        assert Path(path).read_text().startswith('[')
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+    assert 'test-secret' in Path(paths[0][0]).read_text()
+
+
+def test_atomic_credentials_keep_old_file_on_failure(monkeypatch, tmp_path):
+    path = tmp_path / 'credentials'
+    path.write_text('old')
+    monkeypatch.setattr(verda_adaptor.os, 'replace',
+                        MagicMock(side_effect=OSError('replace failed')))
+    with pytest.raises(OSError, match='replace failed'):
+        verda_adaptor._write_private(str(path), 'new')
+    assert path.read_text() == 'old'
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize(
+    'subpath,target',
+    [(None, 'bucket'),
+     ('jobs/workspaces/team/run', 'bucket/jobs/workspaces/team/run')])
+def test_cached_mount_keeps_subpath(monkeypatch, subpath, target):
+    store = storage_lib.VerdaStore.__new__(storage_lib.VerdaStore)
+    store.name = 'bucket'
+    store.bucket = MagicMock(name='bucket')
+    store.bucket.name = 'bucket'
+    store._bucket_sub_path = subpath
+    monkeypatch.setattr(storage_lib.data_utils.Rclone.RcloneStores,
+                        'get_config', lambda *args, **kwargs: 'config')
+    command = store.mount_cached_command('/data')
+    assert f'sky-verda-bucket:{target} /data' in command
+
+
+def test_storage_profiles_use_separate_generated_files(monkeypatch,
+                                                       cli_storage_credentials):
+    first = verda_adaptor.local_s3_files()
+    monkeypatch.setattr(
+        verda_adaptor, '_cli_s3_section', lambda: {
+            'verda_s3_access_key': 'other-access',
+            'verda_s3_secret_key': 'other-secret',
+        })
+    second = verda_adaptor.local_s3_files()
+    assert first != second
+    assert 'test-secret' in Path(first[0]).read_text()
+    assert 'other-secret' in Path(second[0]).read_text()

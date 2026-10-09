@@ -1649,9 +1649,16 @@ class Task:
         # assert len(self.resources) == 1, self.resources
         storage_cloud = None
 
-        enabled_storage_cloud_names = (
+        enabled_storage_cloud_names = [
+            name for name in
             storage_lib.get_cached_enabled_storage_cloud_names_or_refresh(
-                raise_if_no_cloud_access=True))
+                raise_if_no_cloud_access=True)
+            if name not in storage_lib.NO_BUCKET_CREATION_CLOUDS
+        ]
+        if not enabled_storage_cloud_names:
+            raise exceptions.NoCloudAccessError(
+                'No cloud access available for storage that supports '
+                'creating buckets. Please check your cloud credentials.')
 
         if self.best_resources is not None:
             storage_cloud = self.best_resources.cloud

@@ -385,8 +385,8 @@ class Verda(clouds.Cloud):
     def get_credential_file_mounts(self) -> Dict[str, str]:
         credential_file_mounts = verda_adaptor.get_s3_credential_file_mounts()
         if os.path.exists(self.CREDENTIALS_PATH):
-            credential_file_mounts[self.CREDENTIALS_PATH] = (
-                '~/.verda/config.json')
+            credential_file_mounts['~/.verda/config.json'] = (
+                self.CREDENTIALS_PATH)
         return credential_file_mounts
 
     @classmethod
