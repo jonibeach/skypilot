@@ -25,7 +25,7 @@ VERDA_S3_PROFILE_NAME = 'verda'
 VERDA_S3_CREDENTIALS_PATH = '~/.verda/s3.credentials'
 VERDA_S3_CONFIG_PATH = '~/.verda/s3.config'
 _CLI_CREDENTIALS_PATH = '~/.verda/credentials'
-_GENERATED_S3_DIR = '~/.sky/generated/verda'
+_GENERATED_DIR = '~/.sky/generated/verda'
 # https://docs.verda.com/cli/object-storage/#configure-credentials
 DEFAULT_REGION = 'us-east-1'
 _DEFAULT_ENDPOINT = 'https://objects.fin-03.verda.storage'
@@ -773,7 +773,11 @@ def get_endpoint():
         str: The endpoint URL from the config file, or the default endpoint
              if the file doesn't exist or doesn't contain the endpoint_url.
     """
-    config_path = os.path.expanduser(local_s3_files()[1])
+    if not (verda_s3_profile_in_cred() and verda_s3_profile_in_config()):
+        section = _cli_s3_section()
+        if section is not None:
+            return section.get('verda_s3_endpoint', _DEFAULT_ENDPOINT)
+    config_path = os.path.expanduser(VERDA_S3_CONFIG_PATH)
     if not os.path.isfile(config_path):
         return _DEFAULT_ENDPOINT
 
@@ -866,10 +870,10 @@ def local_s3_files(write: bool = True):
     config = (f'[profile {VERDA_S3_PROFILE_NAME}]\n'
               'endpoint_url = '
               f'{section.get("verda_s3_endpoint", _DEFAULT_ENDPOINT)}\n'
-              f'region = {section.get("verda_s3_region", DEFAULT_REGION)}\n')
+              f'region = {DEFAULT_REGION}\n')
     # One folder per set of keys, so profiles do not overwrite each other.
     digest = hashlib.sha256((credentials + config).encode()).hexdigest()
-    directory = os.path.expanduser(f'{_GENERATED_S3_DIR}/s3/{digest}')
+    directory = os.path.expanduser(f'{_GENERATED_DIR}/s3/{digest}')
     credentials_path = os.path.join(directory, 's3.credentials')
     config_path = os.path.join(directory, 's3.config')
     if write:

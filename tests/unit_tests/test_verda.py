@@ -342,7 +342,7 @@ def test_preferred_store_errors_when_only_verda(monkeypatch):
 
 @pytest.fixture
 def cli_storage_credentials(monkeypatch, tmp_path):
-    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR',
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_DIR',
                         str(tmp_path / 'generated'))
     monkeypatch.setattr(verda_adaptor, 'VERDA_S3_CREDENTIALS_PATH',
                         str(tmp_path / 's3.credentials'))
@@ -428,3 +428,8 @@ def test_storage_profiles_use_separate_generated_files(monkeypatch,
     assert first != second
     assert 'test-secret' in Path(first[0]).read_text()
     assert 'other-secret' in Path(second[0]).read_text()
+
+
+def test_endpoint_lookup_does_not_write_credentials(cli_storage_credentials):
+    assert verda_adaptor.get_endpoint() == 'https://objects.example.invalid'
+    assert not cli_storage_credentials.exists()
