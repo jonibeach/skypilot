@@ -22,6 +22,8 @@ logger = sky_logging.init_logger(__name__)
 VERDA_S3_PROFILE_NAME = 'verda'
 VERDA_S3_CREDENTIALS_PATH = '~/.verda/s3.credentials'
 VERDA_S3_CONFIG_PATH = '~/.verda/s3.config'
+_CLI_CREDENTIALS_PATH = '~/.verda/credentials'
+_GENERATED_S3_DIR = '~/.sky/generated/verda'
 DEFAULT_REGION = 'us-east-1'
 _DEFAULT_ENDPOINT = 'https://objects.fin-03.verda.storage'
 
@@ -653,8 +655,9 @@ def _load_verda_s3_credentials_env():
     """Context manager to temporarily change the AWS credentials file path."""
     prev_credentials_path = os.environ.get('AWS_SHARED_CREDENTIALS_FILE')
     prev_config_path = os.environ.get('AWS_CONFIG_FILE')
-    os.environ['AWS_SHARED_CREDENTIALS_FILE'] = VERDA_S3_CREDENTIALS_PATH
-    os.environ['AWS_CONFIG_FILE'] = VERDA_S3_CONFIG_PATH
+    credentials_path, config_path = local_s3_files()
+    os.environ['AWS_SHARED_CREDENTIALS_FILE'] = credentials_path
+    os.environ['AWS_CONFIG_FILE'] = config_path
     try:
         yield
     finally:
@@ -767,7 +770,7 @@ def get_endpoint():
         str: The endpoint URL from the config file, or the default endpoint
              if the file doesn't exist or doesn't contain the endpoint_url.
     """
-    config_path = os.path.expanduser(VERDA_S3_CONFIG_PATH)
+    config_path = os.path.expanduser(local_s3_files()[1])
     if not os.path.isfile(config_path):
         return _DEFAULT_ENDPOINT
 
@@ -807,10 +810,64 @@ def verda_s3_profile_in_config() -> bool:
                               f'[profile {VERDA_S3_PROFILE_NAME}]')
 
 
+def _cli_s3_section():
+    path = os.path.expanduser(_CLI_CREDENTIALS_PATH)
+    if not os.path.isfile(path):
+        return None
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(path)
+    except configparser.Error:
+        return None
+    profile = os.environ.get('VERDA_PROFILE', 'default')
+    if not parser.has_section(profile):
+        return None
+    section = parser[profile]
+    if not (section.get('verda_s3_access_key') and
+            section.get('verda_s3_secret_key')):
+        return None
+    return section
+
+
+def _write_private(path: str, content: str):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+
+def local_s3_files():
+    if verda_s3_profile_in_cred() and verda_s3_profile_in_config():
+        return VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH
+    section = _cli_s3_section()
+    if section is None:
+        return VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH
+    directory = os.path.expanduser(_GENERATED_S3_DIR)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    credentials_path = os.path.join(directory, 's3.credentials')
+    config_path = os.path.join(directory, 's3.config')
+    _write_private(
+        credentials_path, f'[{VERDA_S3_PROFILE_NAME}]\n'
+        f'aws_access_key_id = {section["verda_s3_access_key"]}\n'
+        f'aws_secret_access_key = {section["verda_s3_secret_key"]}\n')
+    _write_private(
+        config_path, f'[profile {VERDA_S3_PROFILE_NAME}]\n'
+        'endpoint_url = '
+        f'{section.get("verda_s3_endpoint", _DEFAULT_ENDPOINT)}\n'
+        f'region = {section.get("verda_s3_region", DEFAULT_REGION)}\n')
+    return credentials_path, config_path
+
+
+def s3_credentials_configured():
+    return ((verda_s3_profile_in_cred() and verda_s3_profile_in_config()) or
+            _cli_s3_section() is not None)
+
+
 def get_s3_credential_file_mounts() -> Dict[str, str]:
     """Returns the Verda object storage credential file mounts."""
-    credential_file_mounts = {}
-    for path in (VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH):
-        if os.path.isfile(os.path.expanduser(path)):
-            credential_file_mounts[path] = path
-    return credential_file_mounts
+    if not s3_credentials_configured():
+        return {}
+    credentials_path, config_path = local_s3_files()
+    return {
+        VERDA_S3_CREDENTIALS_PATH: credentials_path,
+        VERDA_S3_CONFIG_PATH: config_path,
+    }

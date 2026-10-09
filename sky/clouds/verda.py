@@ -346,10 +346,10 @@ class Verda(clouds.Cloud):
     def _check_storage_credentials(
             cls) -> Tuple[bool, Optional[Union[str, Dict[str, str]]]]:
         """Checks for access credentials to Verda object storage."""
+        if verda_adaptor.s3_credentials_configured():
+            return True, None
         profile_in_cred = verda_adaptor.verda_s3_profile_in_cred()
         profile_in_config = verda_adaptor.verda_s3_profile_in_config()
-        if profile_in_cred and profile_in_config:
-            return True, None
 
         profile = verda_adaptor.VERDA_S3_PROFILE_NAME
         hints = ''
@@ -364,7 +364,8 @@ class Verda(clouds.Cloud):
         hints += (
             f'\n{_INDENT_PREFIX}Create an Object Storage access key in the '
             'Verda console under Project management -> Credentials -> '
-            'Object Storage Access Keys, then run:')
+            'Object Storage Access Keys, then either run '
+            '`verda object-storage configure`, or:')
         if not profile_in_cred:
             hints += f'\n{_INDENT_PREFIX}  $ pip install "skypilot[verda]"'
             hints += (f'\n{_INDENT_PREFIX}  $ AWS_SHARED_CREDENTIALS_FILE='
