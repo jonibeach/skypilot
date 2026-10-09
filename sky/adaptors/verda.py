@@ -1,13 +1,18 @@
 """Verda Cloud adaptor."""
 
 import dataclasses
+import hashlib
+import json
 from json import load as json_load
 from json import loads
 import os
+import tempfile
 import time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+_GENERATED_DIR = '~/.sky/generated/verda'
 
 
 @dataclasses.dataclass
@@ -534,9 +539,12 @@ class _HTTPClient:
         return self._base_url + url
 
 
+# https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
 class InstanceStatus:
     """Instance status."""
 
+    # The API documents 13 statuses. STARTING_HIBERNATION, HIBERNATING and
+    # RESTORING come from the older DataCrunch SDK and are not documented.
     ORDERED = 'ordered'
     RUNNING = 'running'
     PROVISIONING = 'provisioning'
@@ -545,6 +553,14 @@ class InstanceStatus:
     HIBERNATING = 'hibernating'
     RESTORING = 'restoring'
     ERROR = 'error'
+    DISCONTINUED = 'discontinued'
+    UNKNOWN = 'unknown'
+    NOTFOUND = 'notfound'
+    NEW = 'new'
+    DELETING = 'deleting'
+    VALIDATING = 'validating'
+    NO_CAPACITY = 'no_capacity'
+    INSTALLATION_FAILED = 'installation_failed'
 
 
 class Instance:
@@ -556,6 +572,8 @@ class Instance:
         self.hostname = data['hostname']
         # For not yet provisioned instances, ip is not available
         self.ip = data.get('ip')
+        # https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
+        self.os_volume_id = data.get('os_volume_id')
 
 
 class SSHKey:
@@ -592,6 +610,14 @@ class VerdaClient:
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
 
+    # https://api.verda.com/v1/docs#tag/os-images/GET/v1/images
+    def images_get(self, instance_type: str):
+        if self.http_client is None:
+            self.http_client = _HTTPClient()
+        response = self.http_client.get('/images',
+                                        params={'instance_type': instance_type})
+        return [image['image_type'] for image in response.json()]
+
     def ssh_keys_get(self) -> List[SSHKey]:
         """Get all ssh keys."""
         if self.http_client is None:
@@ -614,9 +640,51 @@ class VerdaClient:
         instance = self.instance_get(instance_id)
         return instance
 
-    def instance_action(self, instance_id: str, action: str) -> None:
+    def instance_action(self,
+                        instance_id: str,
+                        action: str,
+                        volume_ids: Optional[List[str]] = None) -> None:
         if self.http_client is None:
             self.http_client = _HTTPClient()
-        payload = {'id': [instance_id], 'action': action}
+        payload: Dict[str, Any] = {'id': [instance_id], 'action': action}
+        if volume_ids:
+            # https://api.verda.com/v1/docs#tag/instances/PUT/v1/instances
+            # https://api.verda.com/v1/docs#description/2026-02-03-delete-volumes-permanently-when-deleting-an-instance
+            payload['volume_ids'] = volume_ids
+            payload['delete_permanently'] = True
         self.http_client.put('/instances', body=payload)
         return None
+
+
+# Write to a temporary file and rename it, so a reader (the AWS CLI, goofys,
+# rclone or another API server worker) never sees a partly written file.
+def _write_private(path: str, content: str):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w',
+                                     encoding='utf-8',
+                                     dir=directory,
+                                     delete=False) as f:
+        temporary_path = f.name
+        try:
+            f.write(content)
+            f.close()
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+
+def get_compute_credential_file_mounts():
+    # Credentials can come from VERDA_* or DATACRUNCH_* env vars instead of
+    # ~/.verda/config.json, so write the resolved config to a file the remote
+    # can mount. The hash in the path changes the mount when the credentials
+    # change.
+    configured, _, config = get_verda_configuration()
+    if not configured or config is None:
+        return {}
+    content = json.dumps(dataclasses.asdict(config), sort_keys=True)
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    path = os.path.expanduser(f'{_GENERATED_DIR}/compute/{digest}/config.json')
+    _write_private(path, content)
+    return {'~/.verda/config.json': path}

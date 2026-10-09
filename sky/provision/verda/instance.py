@@ -8,6 +8,7 @@ from sky import sky_logging
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
+from sky.adaptors.verda import VerdaException
 from sky.clouds.verda import VERDA_DEFAULT_IMAGE
 from sky.provision import common
 from sky.resources import DEFAULT_DISK_SIZE_GB
@@ -29,17 +30,56 @@ SSH_CONN_RETRY_INTERVAL_SECONDS = 10
 
 verda = VerdaClient()
 
+# https://api.verda.com/v1/docs#tag/instances/GET/v1/instances
+_PENDING_STATUSES = [
+    InstanceStatus.NEW,
+    InstanceStatus.ORDERED,
+    InstanceStatus.VALIDATING,
+    InstanceStatus.PROVISIONING,
+]
+_FAILED_STATUSES = [
+    InstanceStatus.ERROR,
+    InstanceStatus.NO_CAPACITY,
+    InstanceStatus.INSTALLATION_FAILED,
+    InstanceStatus.DISCONTINUED,
+    InstanceStatus.NOTFOUND,
+]
+_STATUS_MAP = {
+    InstanceStatus.NEW: status_lib.ClusterStatus.INIT,
+    InstanceStatus.ORDERED: status_lib.ClusterStatus.INIT,
+    InstanceStatus.VALIDATING: status_lib.ClusterStatus.INIT,
+    InstanceStatus.PROVISIONING: status_lib.ClusterStatus.INIT,
+    InstanceStatus.RESTORING: status_lib.ClusterStatus.INIT,
+    InstanceStatus.UNKNOWN: status_lib.ClusterStatus.INIT,
+    InstanceStatus.ERROR: status_lib.ClusterStatus.INIT,
+    InstanceStatus.NO_CAPACITY: status_lib.ClusterStatus.INIT,
+    InstanceStatus.INSTALLATION_FAILED: status_lib.ClusterStatus.INIT,
+    InstanceStatus.RUNNING: status_lib.ClusterStatus.UP,
+    # Shut down but not deleted. Verda keeps billing for it.
+    InstanceStatus.OFFLINE: status_lib.ClusterStatus.STOPPED,
+    InstanceStatus.STARTING_HIBERNATION: status_lib.ClusterStatus.STOPPED,
+    InstanceStatus.HIBERNATING: status_lib.ClusterStatus.STOPPED,
+    # Already terminated - should be filtered out
+    InstanceStatus.DISCONTINUED: None,
+    # Being deleted - should be filtered out
+    InstanceStatus.DELETING: None,
+    InstanceStatus.NOTFOUND: None,
+}
+
 
 def _filter_instances(
         cluster_name_on_cloud: str,
         status_filters: Optional[List[str]] = None) -> Dict[str, Instance]:
     instances = verda.instances_get()
+    hostnames = {
+        f'{cluster_name_on_cloud}-head', f'{cluster_name_on_cloud}-worker'
+    }
     filtered_instances = {}
     for instance in instances:
         instance_id = instance.instance_id
         instance_name = instance.hostname
         # Filter by cluster name
-        if cluster_name_on_cloud not in instance_name:
+        if instance_name not in hostnames:
             continue
         # Filter by status if status_filters is provided
         if status_filters is not None and instance.status not in status_filters:
@@ -61,6 +101,32 @@ def _get_head_instance_id(instances: Dict[str, Instance]) -> Optional[str]:
     return head_instance_id
 
 
+# https://api.verda.com/v1/docs#tag/os-images/GET/v1/images
+def _fallback_image(instance_type: str):
+    # /images lists the newest CUDA image first. Some types have no CUDA
+    # image at all (1V100.6V only has 24.04.base, jupyter and 26.04.base), and
+    # jupyter is then the only image with NVIDIA drivers. The
+    # ubuntu-24.04-cuda-* names match the style of VERDA_DEFAULT_IMAGE, in
+    # case /images returns them.
+    images = verda.images_get(instance_type)
+    for matches in (
+            lambda i: _is_cuda_image(i) and i.endswith(('.docker', '-docker')),
+            _is_cuda_image,
+            lambda i: i == 'jupyter',
+    ):
+        image = next((i for i in images if matches(i)), None)
+        if image is not None:
+            logger.info(f'Default image is not valid for {instance_type}, '
+                        f'using {image}.')
+            return image
+    raise exceptions.ResourcesUnavailableError(
+        f'No supported Verda image for {instance_type}.')
+
+
+def _is_cuda_image(image: str):
+    return image.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-'))
+
+
 def find_ssh_key_id(public_key: str):
     ssh_keys = verda.ssh_keys_get()
     for ssh_key in ssh_keys:
@@ -78,29 +144,23 @@ def run_instances(
 ) -> common.ProvisionRecord:
     """Runs instances for the given cluster."""
     del cluster_name  # unused
-    pending_statuses = [
-        InstanceStatus.PROVISIONING,
-        InstanceStatus.ORDERED,
-    ]
     newly_started_instances = _filter_instances(cluster_name_on_cloud,
-                                                pending_statuses)
-    while True:
-        instances = _filter_instances(cluster_name_on_cloud, pending_statuses)
+                                                _PENDING_STATUSES)
+    for _ in range(MAX_POLLS_FOR_UP_OR_TERMINATE):
+        instances = _filter_instances(cluster_name_on_cloud, _PENDING_STATUSES)
         if not instances:
             break
         instance_statuses = [instance.status for instance in instances.values()]
         logger.info(f'Waiting for {len(instances)} instances to be ready: '
                     f'{instance_statuses}')
         time.sleep(POLL_INTERVAL)
-
-    exist_instances = _filter_instances(cluster_name_on_cloud, pending_statuses)
-    if len(exist_instances) > config.count:
-        raise RuntimeError(
-            f'Cluster {cluster_name_on_cloud} already has '
-            f'{len(exist_instances)} nodes, but {config.count} are required.')
+    else:
+        raise exceptions.ResourcesUnavailableError(
+            f'Timed out waiting for pending Verda instances in '
+            f'cluster {cluster_name_on_cloud}.')
 
     exist_instances = _filter_instances(cluster_name_on_cloud,
-                                        status_filters=['ACTIVE'])
+                                        status_filters=[InstanceStatus.RUNNING])
     head_instance_id = _get_head_instance_id(exist_instances)
     to_start_count = config.count - len(exist_instances)
     if to_start_count < 0:
@@ -118,12 +178,14 @@ def run_instances(
             provider_name='verda',
             cluster_name=cluster_name_on_cloud,
             region=region,
-            zone=config.provider_config['zones'],
+            zone=None,
             head_instance_id=head_instance_id,
             resumed_instance_ids=list(newly_started_instances.keys()),
             created_instance_ids=[],
         )
 
+    # Get image from node_config (populated from template)
+    image = config.node_config.get('ImageId', VERDA_DEFAULT_IMAGE)
     created_instance_ids = []
     for _ in range(to_start_count):
         node_type = 'head' if head_instance_id is None else 'worker'
@@ -134,9 +196,6 @@ def run_instances(
             disk_size = config.node_config.get('DiskSize', DEFAULT_DISK_SIZE_GB)
             # Preemptible - fancy way to call it a spot instance
             is_spot = config.node_config.get('Preemptible', None)
-
-            # Get image from node_config (populated from template)
-            image = config.node_config.get('ImageId', VERDA_DEFAULT_IMAGE)
 
             ssh_public_key = config.node_config['PublicKey']
             if ssh_public_key is None:
@@ -157,7 +216,27 @@ def run_instances(
                     'size': disk_size,
                 }
             }
-            response = verda.instance_create(instance_data)
+            # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
+            # https://api.verda.com/v1/docs#description/2026-02-03-spot-instance-volume-policy
+            # The default, keep_detached, leaves the OS volume billing after
+            # Verda evicts a spot instance.
+            if is_spot:
+                instance_data['os_volume'][
+                    'on_spot_discontinue'] = 'delete_permanently'
+            try:
+                response = verda.instance_create(instance_data)
+            except VerdaException as e:
+                # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
+                # The default image uses NVIDIA's open kernel modules, which
+                # need a Turing or newer GPU, so Verda rejects it on V100 with
+                # "Operating system is not valid for this instance type". The
+                # API docs do not list this message.
+                if (image != VERDA_DEFAULT_IMAGE or
+                        'Operating system is not valid' not in e.message):
+                    raise
+                image = _fallback_image(instance_type)
+                instance_data['image'] = image
+                response = verda.instance_create(instance_data)
             instance_id = response.instance_id
         except Exception as e:  # pylint: disable=broad-except
             # API errors - provide specific message
@@ -195,6 +274,19 @@ def run_instances(
 
     # Wait for instances to be ready.
     for _ in range(MAX_POLLS_FOR_UP_OR_TERMINATE):
+        failed = {
+            inst_id: inst
+            for inst_id, inst in _filter_instances(cluster_name_on_cloud,
+                                                   _FAILED_STATUSES).items()
+            if inst_id in created_instance_ids
+        }
+        if failed:
+            instance_type = config.node_config['InstanceType']
+            statuses = sorted({inst.status for inst in failed.values()})
+            with ux_utils.print_exception_no_traceback():
+                raise exceptions.ResourcesUnavailableError(
+                    f'Failed to launch {instance_type} on Verda in region '
+                    f'{region}: instance status {", ".join(statuses)}.')
         instances = _filter_instances(cluster_name_on_cloud,
                                       [InstanceStatus.RUNNING])
         logger.info('Waiting for instances to be ready: '
@@ -265,9 +357,8 @@ def terminate_instances(
 
     # Filter out already terminated instances
     non_terminated_instances = {
-        inst_id: inst
-        for inst_id, inst in instances.items()
-        if inst.status not in [InstanceStatus.OFFLINE]
+        inst_id: inst for inst_id, inst in instances.items() if inst.status
+        not in [InstanceStatus.DISCONTINUED, InstanceStatus.DELETING]
     }
 
     if not non_terminated_instances:
@@ -292,7 +383,12 @@ def terminate_instances(
         if worker_only and inst.hostname.endswith('-head'):
             continue
         try:
-            verda.instance_action(instance_id=instance_id, action='delete')
+            # Without volume_ids, the OS volume survives detached and keeps
+            # billing. Verda removes it a few minutes after the instance.
+            verda.instance_action(
+                instance_id=instance_id,
+                action='delete',
+                volume_ids=[inst.os_volume_id] if inst.os_volume_id else None)
             terminated_instances.append(instance_id)
             name = inst.hostname
             logger.info(
@@ -321,7 +417,8 @@ def terminate_instances(
         # Check if all terminated instances are gone
         still_exist = [
             inst_id for inst_id in terminated_instances
-            if inst_id in remaining_instances
+            if inst_id in remaining_instances and
+            remaining_instances[inst_id].status != InstanceStatus.DISCONTINUED
         ]
         if not still_exist:
             logger.info('All instances have been successfully terminated')
@@ -387,6 +484,7 @@ def get_cluster_info(
 
 
 def query_instances(
+    cluster_name: str,
     cluster_name_on_cloud: str,
     provider_config: Optional[Dict[str, Any]] = None,
     non_terminated_only: bool = True,
@@ -394,24 +492,18 @@ def query_instances(
 ) -> Dict[str, Tuple[Optional['status_lib.ClusterStatus'], Optional[str]]]:
     """See sky/provision/__init__.py"""
     assert provider_config is not None, (cluster_name_on_cloud, provider_config)
-    del retry_if_missing  # unused
+    del cluster_name, retry_if_missing  # unused
     instances = _filter_instances(cluster_name_on_cloud, None)
 
-    status_map = {
-        InstanceStatus.PROVISIONING: status_lib.ClusterStatus.INIT,
-        InstanceStatus.ERROR: status_lib.ClusterStatus.INIT,
-        InstanceStatus.RUNNING: status_lib.ClusterStatus.UP,
-        InstanceStatus.OFFLINE: status_lib.ClusterStatus.STOPPED,
-        'deleted': None,  # Being deleted - should be filtered out
-        'discontinued': None,  # Already terminated - should be filtered out
-    }
     statuses: Dict[str, Tuple[Optional[status_lib.ClusterStatus],
                               Optional[str]]] = {}
     for inst_id, inst in instances.items():
-        status = status_map[inst.status]
+        status = _STATUS_MAP.get(inst.status, status_lib.ClusterStatus.INIT)
         if non_terminated_only and status is None:
             continue
-        statuses[inst_id] = (status, None)
+        reason = (f'Verda instance status: {inst.status}'
+                  if inst.status in _FAILED_STATUSES else None)
+        statuses[inst_id] = (status, reason)
     return statuses
 
 

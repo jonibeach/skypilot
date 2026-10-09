@@ -6,6 +6,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 from sky import catalog
 from sky import clouds
+from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import get_verda_configuration
 from sky.utils import registry
 from sky.utils import resources_utils
@@ -43,25 +44,21 @@ class Verda(clouds.Cloud):
             (f'Custom network tier is not supported yet on {_REPR}.'),
         clouds.CloudImplementationFeatures.OPEN_PORTS:
             (f'Opening ports is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.STORAGE_MOUNTING:
-            (f'Mounting object stores is not supported on {_REPR}. To read '
-             f'data from object stores on {_REPR}, use `mode: COPY` to copy '
-             'the data to local disk.'),
-        clouds.CloudImplementationFeatures.HOST_CONTROLLERS:
-            (f'Host controllers are not supported yet on {_REPR}.'),
         clouds.CloudImplementationFeatures.HIGH_AVAILABILITY_CONTROLLERS:
             (f'High availability controllers are not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.AUTOSTOP:
             (f'Auto-stop is not supported on {_REPR}.'),
-        clouds.CloudImplementationFeatures.AUTODOWN:
-            (f'Auto-down is not supported on {_REPR}.'),
         clouds.CloudImplementationFeatures.CUSTOM_MULTI_NETWORK:
             ('Customized multiple network interfaces are not supported '
              f'on {_REPR}.'),
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}'),
     }
-    _MAX_CLUSTER_NAME_LEN_LIMIT = 120
+    # Verda rejects hostnames of 60 or more characters ("Invalid hostname.
+    # Must contain alphanumeric values or dash only, and be shorter than
+    # 60"), and the hostname adds '-worker' to the cluster name.
+    # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
+    _MAX_CLUSTER_NAME_LEN_LIMIT = 52
     _MAX_VOLUME_NAME_LEN_LIMIT = 30
     CREDENTIALS_PATH = os.path.expanduser('~/.verda/config.json')
     PROVISIONER_VERSION = clouds.ProvisionerVersion.SKYPILOT
@@ -94,7 +91,7 @@ class Verda(clouds.Cloud):
         return unsupported_features
 
     @classmethod
-    def _max_cluster_name_length(cls) -> Optional[int]:
+    def max_cluster_name_length(cls) -> Optional[int]:
         return cls._MAX_CLUSTER_NAME_LEN_LIMIT
 
     @classmethod
@@ -168,6 +165,13 @@ class Verda(clouds.Cloud):
         """Returns the hourly cost of the accelerators, in dollars/hour."""
         del accelerators, use_spot, region, zone  # unused
         return 0.0  # Verda includes accelerators in the hourly cost.
+
+    def need_cleanup_after_preemption_or_failure(
+            self, resources: 'resources_lib.Resources') -> bool:
+        del resources  # unused
+        # Delete a preempted or failed cluster before relaunching, so the old
+        # instance and its OS volume are not left behind and billing.
+        return True
 
     def get_egress_cost(self, num_gigabytes: float) -> float:
         return 0.0
@@ -343,9 +347,7 @@ class Verda(clouds.Cloud):
         return 'verda'
 
     def get_credential_file_mounts(self) -> Dict[str, str]:
-        if os.path.exists(self.CREDENTIALS_PATH):
-            return {f'{self.CREDENTIALS_PATH}': '~/.verda/config.json'}
-        return {}
+        return verda_adaptor.get_compute_credential_file_mounts()
 
     @classmethod
     def get_user_identities(cls) -> Optional[List[List[str]]]:

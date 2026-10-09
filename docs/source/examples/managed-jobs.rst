@@ -731,6 +731,9 @@ To use a remote jobs controller with a remote API server, set ``consolidation_mo
 The controller cluster is automatically launched when the first managed job is submitted, and it is autostopped after it has been idle for 10 minutes (i.e., after all managed jobs finish and no new managed job is submitted in that duration).
 Thus, **no user action is needed** to manage its lifecycle.
 
+.. note::
+  Verda can't stop instances, so a jobs controller on Verda is torn down when idle instead of stopped. This loses the logs and status of finished managed jobs. To keep them, host the controller on another cloud with :ref:`jobs.controller.resources <jobs-controller-custom-resources>`.
+
 You can see the controller with :code:`sky status -u` and refresh its status by using the :code:`-r/--refresh` flag.
 
 While the cost of the jobs controller is negligible (~$0.25/hour when running and less than $0.004/hour when stopped),

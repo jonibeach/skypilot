@@ -1849,8 +1849,8 @@ class RetryingVmProvisioner(object):
                 requested_features = self._requested_features.copy()
                 # Skip stop feature for Kubernetes and RunPod controllers.
                 if (isinstance(to_provision.cloud,
-                               (clouds.Kubernetes, clouds.RunPod)) and
-                        controller_utils.Controllers.from_name(cluster_name)
+                               (clouds.Kubernetes, clouds.RunPod, clouds.Verda))
+                        and controller_utils.Controllers.from_name(cluster_name)
                         is not None):
                     # If autostop is disabled in config, the feature may not be
                     # requested, so use discard() instead of remove().
@@ -6002,8 +6002,8 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if idle_minutes_to_autostop is not None:
             # Skip auto-stop for Kubernetes and RunPod clusters.
             if (isinstance(handle.launched_resources.cloud,
-                           (clouds.Kubernetes, clouds.RunPod)) and not down and
-                    idle_minutes_to_autostop >= 0):
+                           (clouds.Kubernetes, clouds.RunPod, clouds.Verda)) and
+                    not down and idle_minutes_to_autostop >= 0):
                 # We should hit this code path only for the controllers on
                 # Kubernetes and RunPod clusters, because autostop() will
                 # skip the supported feature check. Non-controller k8s/runpod
@@ -6011,13 +6011,16 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 controller = controller_utils.Controllers.from_name(
                     handle.cluster_name)
                 assert (controller is not None), handle.cluster_name
-                if (controller
+                cloud = handle.launched_resources.cloud
+                if isinstance(cloud, clouds.Verda) or (
+                        controller
                         == controller_utils.Controllers.SKY_SERVE_CONTROLLER and
-                        isinstance(handle.launched_resources.cloud,
-                                   clouds.Kubernetes)):
+                        isinstance(cloud, clouds.Kubernetes)):
                     # For SkyServe controllers on Kubernetes: override autostop
                     # behavior to force autodown (instead of no-op)
                     # to avoid dangling controllers.
+                    # Verda cannot stop instances, so any controller there is
+                    # torn down when idle rather than left running and billing.
 
                     # down = False is the default, but warn the user in case
                     # they have explicitly specified it.
@@ -6027,10 +6030,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                          'autostop', 'down'), None)
                     if config_override_down is False:  # will not match None
                         logger.warning(
-                            'SkyServe controller autodown is disabled in the '
-                            '~/.sky/config.yaml configuration file '
-                            '(serve.controller.autostop.down_when_idle), but '
-                            'it is force enabled for Kubernetes clusters.')
+                            f'{controller.value.name.capitalize()} autodown '
+                            'is disabled in the ~/.sky/config.yaml '
+                            'configuration file '
+                            f'({controller.value.controller_type}.controller.'
+                            'autostop.down), but it is force enabled for '
+                            f'{cloud} clusters.')
 
                     down = True
                 else:
