@@ -109,19 +109,22 @@ def _fallback_image(instance_type: str):
     # ubuntu-24.04-cuda-* names match the style of VERDA_DEFAULT_IMAGE, in
     # case /images returns them.
     images = verda.images_get(instance_type)
-    candidates = ([
-        i for i in images
-        if (i.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-')) and i.endswith(
-            ('.docker', '-docker')))
-    ] + [
-        i for i in images if i.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-'))
-    ] + [i for i in images if i == 'jupyter'])
-    if not candidates:
-        raise exceptions.ResourcesUnavailableError(
-            f'No supported Verda image for {instance_type}.')
-    logger.info(f'Default image is not valid for {instance_type}, '
-                f'using {candidates[0]}.')
-    return candidates[0]
+    for matches in (
+            lambda i: _is_cuda_image(i) and i.endswith(('.docker', '-docker')),
+            _is_cuda_image,
+            lambda i: i == 'jupyter',
+    ):
+        image = next((i for i in images if matches(i)), None)
+        if image is not None:
+            logger.info(f'Default image is not valid for {instance_type}, '
+                        f'using {image}.')
+            return image
+    raise exceptions.ResourcesUnavailableError(
+        f'No supported Verda image for {instance_type}.')
+
+
+def _is_cuda_image(image: str):
+    return image.startswith(('24.04.cuda', 'ubuntu-24.04-cuda-'))
 
 
 def find_ssh_key_id(public_key: str):
@@ -181,6 +184,8 @@ def run_instances(
             created_instance_ids=[],
         )
 
+    # Get image from node_config (populated from template)
+    image = config.node_config.get('ImageId', VERDA_DEFAULT_IMAGE)
     created_instance_ids = []
     for _ in range(to_start_count):
         node_type = 'head' if head_instance_id is None else 'worker'
@@ -191,9 +196,6 @@ def run_instances(
             disk_size = config.node_config.get('DiskSize', DEFAULT_DISK_SIZE_GB)
             # Preemptible - fancy way to call it a spot instance
             is_spot = config.node_config.get('Preemptible', None)
-
-            # Get image from node_config (populated from template)
-            image = config.node_config.get('ImageId', VERDA_DEFAULT_IMAGE)
 
             ssh_public_key = config.node_config['PublicKey']
             if ssh_public_key is None:
@@ -232,7 +234,8 @@ def run_instances(
                 if (image != VERDA_DEFAULT_IMAGE or
                         'Operating system is not valid' not in e.message):
                     raise
-                instance_data['image'] = _fallback_image(instance_type)
+                image = _fallback_image(instance_type)
+                instance_data['image'] = image
                 response = verda.instance_create(instance_data)
             instance_id = response.instance_id
         except Exception as e:  # pylint: disable=broad-except
@@ -264,18 +267,6 @@ def run_instances(
             logger.warning(f'API error during instance launch: {e}')
             with ux_utils.print_exception_no_traceback():
                 raise exceptions.ResourcesUnavailableError(error_msg) from e
-        if response.hostname != instance_data['hostname']:
-            verda.instance_action(instance_id=instance_id,
-                                  action='delete',
-                                  volume_ids=[response.os_volume_id]
-                                  if response.os_volume_id else None)
-            with ux_utils.print_exception_no_traceback():
-                raise exceptions.ResourcesUnavailableError(
-                    f'Verda changed the hostname {instance_data["hostname"]!r} '
-                    f'to {response.hostname!r}, so SkyPilot cannot track the '
-                    'instance. Deleted it. Try a shorter, lowercase cluster '
-                    'name.',
-                    no_failover=True)
         logger.info(f'Launched instance {instance_id}.')
         created_instance_ids.append(instance_id)
         if head_instance_id is None:
