@@ -592,11 +592,13 @@ class VerdaClient:
         response = self.http_client.get(f'/instances/{instance_id}').json()
         return Instance(response)
 
+    # https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
     def instance_types_get(self):
         if self.http_client is None:
             self.http_client = _HTTPClient()
         return self.http_client.get('/instance-types').json()
 
+    # https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
     def locations_get(self):
         if self.http_client is None:
             self.http_client = _HTTPClient()
@@ -605,6 +607,7 @@ class VerdaClient:
             for location in self.http_client.get('/locations').json()
         ]
 
+    # https://api.verda.com/v1/docs#tag/instance-availability/GET/v1/instance-availability
     def instance_availability_get(self, is_spot: bool):
         if self.http_client is None:
             self.http_client = _HTTPClient()
