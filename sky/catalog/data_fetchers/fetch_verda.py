@@ -48,6 +48,7 @@ def _get_oauth_token(base_url: str, client_id: str, client_secret: str) -> str:
     return token_data['access_token']
 
 
+# https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
 def _fetch_instance_types(base_url: str, token: str) -> List[Dict]:
     """Fetch all instance types from the API.
 
@@ -67,6 +68,7 @@ def _fetch_instance_types(base_url: str, token: str) -> List[Dict]:
     return response.json()
 
 
+# https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
 def _fetch_locations(base_url: str, token: str) -> List[str]:
     url = f'{base_url}/locations'
     headers = {'Authorization': f'Bearer {token}'}
