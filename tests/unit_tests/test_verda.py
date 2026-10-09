@@ -665,3 +665,8 @@ def test_fallback_image_is_reused_for_every_node(monkeypatch):
     verda_instance.run_instances('FIN-03', 'cluster', 'cluster', config)
     fallback.assert_called_once_with('gpu')
     assert create.call_args.args[0]['image'] == '24.04.cuda13.2.docker'
+
+
+def test_endpoint_lookup_does_not_write_credentials(cli_storage_credentials):
+    assert verda_adaptor.get_endpoint() == 'https://objects.example.invalid'
+    assert not cli_storage_credentials.exists()
