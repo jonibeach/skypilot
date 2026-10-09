@@ -543,6 +543,8 @@ class _HTTPClient:
 class InstanceStatus:
     """Instance status."""
 
+    # The API documents 13 statuses. STARTING_HIBERNATION, HIBERNATING and
+    # RESTORING come from the older DataCrunch SDK and are not documented.
     ORDERED = 'ordered'
     RUNNING = 'running'
     PROVISIONING = 'provisioning'
@@ -654,6 +656,8 @@ class VerdaClient:
         return None
 
 
+# Write to a temporary file and rename it, so a reader (the AWS CLI, goofys,
+# rclone or another API server worker) never sees a partly written file.
 def _write_private(path: str, content: str):
     directory = os.path.dirname(path)
     os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -672,6 +676,10 @@ def _write_private(path: str, content: str):
 
 
 def get_compute_credential_file_mounts():
+    # Credentials can come from VERDA_* or DATACRUNCH_* env vars instead of
+    # ~/.verda/config.json, so write the resolved config to a file the remote
+    # can mount. The hash in the path changes the mount when the credentials
+    # change.
     configured, _, config = get_verda_configuration()
     if not configured or config is None:
         return {}

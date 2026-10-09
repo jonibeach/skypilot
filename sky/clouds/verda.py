@@ -54,6 +54,10 @@ class Verda(clouds.Cloud):
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}'),
     }
+    # Verda rejects hostnames of 60 or more characters ("Invalid hostname.
+    # Must contain alphanumeric values or dash only, and be shorter than
+    # 60"), and the hostname adds '-worker' to the cluster name.
+    # https://api.verda.com/v1/docs#tag/instances/POST/v1/instances
     _MAX_CLUSTER_NAME_LEN_LIMIT = 52
     _MAX_VOLUME_NAME_LEN_LIMIT = 30
     CREDENTIALS_PATH = os.path.expanduser('~/.verda/config.json')
@@ -165,6 +169,8 @@ class Verda(clouds.Cloud):
     def need_cleanup_after_preemption_or_failure(
             self, resources: 'resources_lib.Resources') -> bool:
         del resources  # unused
+        # Delete a preempted or failed cluster before relaunching, so the old
+        # instance and its OS volume are not left behind and billing.
         return True
 
     def get_egress_cost(self, num_gigabytes: float) -> float:
