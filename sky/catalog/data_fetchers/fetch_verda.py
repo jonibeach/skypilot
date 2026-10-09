@@ -9,74 +9,12 @@ import logging
 import os
 import re
 import sys
-from typing import Dict, List, Optional
-
-import requests
+from typing import Dict, List
 
 from sky import sky_logging
+from sky.adaptors import verda
 
 logger = sky_logging.init_logger('fetch_verda')
-
-
-def _get_oauth_token(base_url: str, client_id: str, client_secret: str) -> str:
-    """Get OAuth access token using client credentials.
-
-    Args:
-        base_url: Base URL for the API
-        client_id: Client ID for authentication
-        client_secret: Client secret for authentication
-
-    Returns:
-        str: Access token
-    """
-
-    token_url = f'{base_url}/oauth2/token'
-    payload = {
-        'grant_type': 'client_credentials',
-        'client_id': client_id,
-        'client_secret': client_secret,
-    }
-    headers = {'Content-type': 'application/json'}
-
-    response = requests.post(token_url,
-                             json=payload,
-                             headers=headers,
-                             timeout=30)
-    response.raise_for_status()
-
-    token_data = response.json()
-    return token_data['access_token']
-
-
-# https://api.verda.com/v1/docs#tag/instance-types/GET/v1/instance-types
-def _fetch_instance_types(base_url: str, token: str) -> List[Dict]:
-    """Fetch all instance types from the API.
-
-    Args:
-        base_url: Base URL for the API
-        token: OAuth access token
-
-    Returns:
-        List[Dict]: List of instance type dictionaries
-    """
-    url = f'{base_url}/instance-types'
-    headers = {'Authorization': f'Bearer {token}'}
-
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    return response.json()
-
-
-# https://api.verda.com/v1/docs#tag/locations/GET/v1/locations
-def _fetch_locations(base_url: str, token: str) -> List[str]:
-    url = f'{base_url}/locations'
-    headers = {'Authorization': f'Bearer {token}'}
-
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    return [location['code'] for location in response.json()]
 
 
 def _extract_gpu_model(instance: Dict) -> str:
@@ -253,41 +191,18 @@ def create_catalog(output_path: str) -> None:
     """
 
     # Get authentication credentials
-    client_id: Optional[str] = None
-    client_secret: Optional[str] = None
-    base_url: Optional[str] = None
-
-    config_file_path = os.path.expanduser('~/.verda/config.json')
-    if os.path.exists(config_file_path):
-        with open(config_file_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            client_id = config.get('client_id', client_id)
-            client_secret = config.get('client_secret', client_secret)
-            base_url = config.get('base_url', base_url)
-
-    client_id = os.environ.get('VERDA_CLIENT_ID', client_id)
-    client_secret = os.environ.get('VERDA_CLIENT_SECRET', client_secret)
-    base_url = os.environ.get('VERDA_BASE_URL', base_url)
-
-    if not base_url:
-        base_url = 'https://api.verda.com/v1'
-
-    if not client_id or not client_secret:
-        raise Exception('Verda Cloud configuration not found. '
-                        'Please set VERDA_CLIENT_ID and VERDA_CLIENT_SECRET '
-                        'environment variables or create ~/.verda/config.json.')
+    client = verda.VerdaClient()
 
     # Get OAuth token
     logger.info('Authenticating with Verda Cloud API...')
-    token = _get_oauth_token(base_url, client_id, client_secret)
 
     # Fetch instance types
     logger.info('Fetching instance types...')
-    instance_types = _fetch_instance_types(base_url, token)
+    instance_types = client.instance_types_get()
     logger.info(f'Fetched {len(instance_types)} instance types')
 
     logger.info('Fetching locations...')
-    locations = _fetch_locations(base_url, token)
+    locations = client.locations_get()
     logger.info(f'Fetched {len(locations)} locations')
 
     # Create output directory if needed
