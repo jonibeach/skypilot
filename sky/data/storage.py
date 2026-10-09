@@ -34,6 +34,7 @@ from sky.adaptors import nebius
 from sky.adaptors import oci
 from sky.adaptors import oci_s3
 from sky.adaptors import vastdata
+from sky.adaptors import verda
 from sky.clouds import cloud as sky_cloud
 from sky.data import data_transfer
 from sky.data import data_utils
@@ -68,6 +69,7 @@ STORE_ENABLED_CLOUDS: List[str] = [
     str(clouds.IBM()),
     str(clouds.OCI()),
     str(clouds.Nebius()),
+    str(clouds.Verda()),
     cloudflare.NAME,
     coreweave.NAME,
     vastdata.NAME,
@@ -152,6 +154,7 @@ class StoreType(enum.Enum):
     NEBIUS = 'NEBIUS'
     COREWEAVE = 'COREWEAVE'
     VASTDATA = 'VASTDATA'
+    VERDA = 'VERDA'
     HF = 'HF'
     VOLUME = 'VOLUME'
 
@@ -1211,7 +1214,7 @@ class Storage(object):
                 is_local_source = True
             elif split_path.scheme in [
                     's3', 'gs', 'https', 'r2', 'cos', 'oci', 'nebius', 'cw',
-                    'vastdata', 'hf'
+                    'vastdata', 'verda', 'hf'
             ]:
                 is_local_source = False
                 # Storage mounting does not support mounting specific files from
@@ -1240,7 +1243,7 @@ class Storage(object):
                     raise exceptions.StorageSourceError(
                         f'Supported paths: local, s3://, gs://, https://, '
                         f'r2://, cos://, oci://, nebius://, cw://, '
-                        f'vastdata://, hf://. Got: {source}')
+                        f'vastdata://, verda://, hf://. Got: {source}')
         return source, is_local_source
 
     def _validate_storage_spec(self, name: Optional[str]) -> None:
@@ -1265,6 +1268,7 @@ class Storage(object):
                     'nebius',
                     'cw',
                     'vastdata',
+                    'verda',
                     'hf',
             ]:
                 with ux_utils.print_exception_no_traceback():
@@ -5262,6 +5266,76 @@ class VastDataStore(S3CompatibleStore):
         rclone_profile_name = (
             data_utils.Rclone.RcloneStores.VASTDATA.get_profile_name(self.name))
         rclone_config = data_utils.Rclone.RcloneStores.VASTDATA.get_config(
+            rclone_profile_name=rclone_profile_name)
+        mount_cached_cmd = mounting_utils.get_mount_cached_cmd(
+            rclone_config, rclone_profile_name, self.bucket.name, mount_path,
+            config)
+        return mounting_utils.get_mounting_command(mount_path, install_cmd,
+                                                   mount_cached_cmd)
+
+
+@register_s3_compatible_store
+class VerdaStore(S3CompatibleStore):
+    """VerdaStore inherits from S3CompatibleStore and represents the backend
+    for Verda Object Storage buckets.
+    """
+
+    @classmethod
+    def get_config(cls) -> S3CompatibleConfig:
+        """Return the configuration for Verda Object Storage."""
+        return S3CompatibleConfig(
+            store_type='VERDA',
+            url_prefix='verda://',
+            client_factory=lambda region: data_utils.create_verda_client(),
+            resource_factory=lambda name: verda.resource('s3').Bucket(name),
+            split_path=data_utils.split_verda_path,
+            verify_bucket=data_utils.verify_verda_bucket,
+            aws_profile=verda.VERDA_S3_PROFILE_NAME,
+            get_endpoint_url=verda.get_endpoint,
+            credentials_file=verda.local_s3_files()[0],
+            config_file=verda.local_s3_files()[1],
+            cloud_name=str(clouds.Verda()),
+            default_region=verda.DEFAULT_REGION,
+            mount_cmd_factory=cls._get_verda_mount_cmd,
+        )
+
+    def _get_bucket(self):
+        bucket = self.config.resource_factory(self.name)
+        if data_utils.verify_verda_bucket(self.name):
+            self._validate_existing_bucket()
+            return bucket, False
+        with ux_utils.print_exception_no_traceback():
+            raise exceptions.StorageBucketGetError(
+                f'Bucket {self.name!r} does not exist or is not accessible. '
+                'Verda Object Storage does not allow creating buckets through '
+                'its S3 API during the beta. Create the bucket in the Verda '
+                'console (Object Storage -> Create bucket) and try again.')
+
+    @classmethod
+    def _get_verda_mount_cmd(cls,
+                             bucket_name: str,
+                             mount_path: str,
+                             bucket_sub_path: Optional[str],
+                             read_only: bool = False) -> str:
+        """Factory method for Verda mount command."""
+        return mounting_utils.get_verda_mount_cmd(
+            verda.VERDA_S3_CREDENTIALS_PATH,
+            verda.VERDA_S3_PROFILE_NAME,
+            bucket_name,
+            verda.get_endpoint(),
+            mount_path,
+            region=verda.DEFAULT_REGION,
+            _bucket_sub_path=bucket_sub_path,
+            read_only=read_only)
+
+    def mount_cached_command(self,
+                             mount_path: str,
+                             config: Optional[MountCachedConfig] = None) -> str:
+        """Verda-specific cached mount implementation using rclone."""
+        install_cmd = mounting_utils.get_rclone_install_cmd()
+        rclone_profile_name = (
+            data_utils.Rclone.RcloneStores.VERDA.get_profile_name(self.name))
+        rclone_config = data_utils.Rclone.RcloneStores.VERDA.get_config(
             rclone_profile_name=rclone_profile_name)
         mount_cached_cmd = mounting_utils.get_mount_cached_cmd(
             rclone_config, rclone_profile_name, self.bucket.name, mount_path,
