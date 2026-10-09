@@ -1,20 +1,25 @@
 """Tests for Verda Cloud provider."""
 
+import concurrent.futures
 import json
 from pathlib import Path
 import stat
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from sky import clouds
 from sky import exceptions
+from sky import task as task_lib
 from sky.adaptors import verda as verda_adaptor
 from sky.adaptors.verda import Instance
 from sky.adaptors.verda import InstanceStatus
 from sky.adaptors.verda import VerdaClient
+from sky.catalog import verda_catalog
 from sky.clouds import verda
+from sky.data import storage as storage_lib
 from sky.provision.verda import instance as verda_instance
 
 
@@ -31,6 +36,8 @@ def test_verda_credential_file_mounts(monkeypatch, tmp_path):
     monkeypatch.setattr(verda_adaptor, 'get_verda_configuration', lambda:
                         (True, None, config))
     monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    monkeypatch.setattr(verda_adaptor, 'get_s3_credential_file_mounts',
+                        lambda: {})
     mounts = verda.Verda().get_credential_file_mounts()
     path = Path(mounts['~/.verda/config.json'])
     assert json.loads(path.read_text())['client_secret'] == 'secret'
@@ -316,6 +323,63 @@ class TestVerdaClientInstanceCreation:
         assert "Can't connect to Verda Cloud" in str(exc_info.value)
 
 
+def _enable_storage_clouds(monkeypatch, names):
+    monkeypatch.setattr(storage_lib,
+                        'get_cached_enabled_storage_cloud_names_or_refresh',
+                        lambda raise_if_no_cloud_access=False: names)
+
+
+def test_preferred_store_skips_verda(monkeypatch):
+    _enable_storage_clouds(monkeypatch, ['Verda', 'AWS'])
+    task = task_lib.Task(run='echo hi')
+    task.best_resources = MagicMock(cloud=verda.Verda(), region='FIN-01')
+    assert task._get_preferred_store() == (storage_lib.StoreType.S3, None)
+
+
+def test_preferred_store_errors_when_only_verda(monkeypatch):
+    _enable_storage_clouds(monkeypatch, ['Verda'])
+    task = task_lib.Task(run='echo hi')
+    task.best_resources = MagicMock(cloud=verda.Verda(), region='FIN-01')
+    with pytest.raises(exceptions.NoCloudAccessError):
+        task._get_preferred_store()
+
+
+@pytest.fixture
+def live_catalog(monkeypatch):
+    monkeypatch.setattr(verda_catalog, '_offerings', None)
+    monkeypatch.setattr(verda_catalog, '_in_stock', None)
+    monkeypatch.setattr(verda_catalog.verda, 'get_verda_configuration', lambda:
+                        (True, None, None))
+    client = MagicMock()
+    monkeypatch.setattr(verda_catalog, '_client', client)
+    return client
+
+
+def test_catalog_lists_in_stock_regions_first(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['T', 'T'],
+        'Region': ['FIN-01', 'FIN-03'],
+        'Price': [1.0, 1.0],
+        'SpotPrice': [None, None],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = (
+        lambda is_spot: set() if is_spot else {('T', 'FIN-03')})
+    regions = verda_catalog.get_region_zones_for_instance_type('T', False)
+    assert [region.name for region in regions] == ['FIN-03', 'FIN-01']
+
+
+def test_catalog_caches_failed_fetches(monkeypatch, live_catalog):
+    fetch = MagicMock(side_effect=RuntimeError('down'))
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
+    live_catalog.instance_availability_get.side_effect = RuntimeError('down')
+    for _ in range(2):
+        assert verda_catalog._offerings_df() is verda_catalog._hosted_df
+        assert not verda_catalog._in_stock_regions('T', False)
+    assert fetch.call_count == 1
+    assert live_catalog.instance_availability_get.call_count == 1
+
+
 @pytest.mark.parametrize('prefix', ['VERDA', 'DATACRUNCH'])
 def test_environment_credentials_reach_remote(monkeypatch, tmp_path, prefix):
     for name in ('VERDA_CLIENT_ID', 'VERDA_CLIENT_SECRET',
@@ -326,12 +390,63 @@ def test_environment_credentials_reach_remote(monkeypatch, tmp_path, prefix):
     monkeypatch.setenv(f'{prefix}_BASE_URL', 'https://example.invalid/v1')
     monkeypatch.setenv(f'{prefix}_DEFAULT_REGION', 'FIN-03')
     monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR', str(tmp_path))
+    monkeypatch.setattr(verda_adaptor, 'get_s3_credential_file_mounts',
+                        lambda: {})
     mounts = verda.Verda().get_credential_file_mounts()
     config = json.loads(Path(mounts['~/.verda/config.json']).read_text())
     assert config == dict(client_id='env-id',
                           client_secret='env-secret',
                           base_url='https://example.invalid/v1',
                           default_region='FIN-03')
+
+
+@pytest.fixture
+def cli_storage_credentials(monkeypatch, tmp_path):
+    monkeypatch.setattr(verda_adaptor, '_GENERATED_S3_DIR',
+                        str(tmp_path / 'generated'))
+    monkeypatch.setattr(verda_adaptor, 'VERDA_S3_CREDENTIALS_PATH',
+                        str(tmp_path / 's3.credentials'))
+    monkeypatch.setattr(verda_adaptor, 'VERDA_S3_CONFIG_PATH',
+                        str(tmp_path / 's3.config'))
+    monkeypatch.setattr(
+        verda_adaptor, '_cli_s3_section', lambda: {
+            'verda_s3_access_key': 'test-access',
+            'verda_s3_secret_key': 'test-secret',
+            'verda_s3_endpoint': 'https://objects.example.invalid',
+        })
+    return tmp_path / 'generated'
+
+
+def test_storage_registration_does_not_write_credentials(
+        cli_storage_credentials):
+    storage_lib.register_s3_compatible_store(storage_lib.VerdaStore)
+    assert storage_lib.StoreType.VERDA.store_prefix() == 'verda://'
+    assert not cli_storage_credentials.exists()
+
+
+def test_storage_initialization_prepares_cli_files(monkeypatch,
+                                                   cli_storage_credentials):
+    store = storage_lib.VerdaStore.__new__(storage_lib.VerdaStore)
+    store.config = storage_lib.VerdaStore.get_config()
+
+    def initialize(self):
+        assert 'test-access' in Path(self.config.credentials_file).read_text()
+        assert 'objects.example.invalid' in Path(
+            self.config.config_file).read_text()
+
+    monkeypatch.setattr(storage_lib.S3CompatibleStore, 'initialize', initialize)
+    store.initialize()
+
+
+def test_generated_storage_credentials_are_private(cli_storage_credentials):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        paths = list(
+            pool.map(lambda _: verda_adaptor.local_s3_files(), range(20)))
+    assert len(set(paths)) == 1
+    for path in paths[0]:
+        assert Path(path).read_text().startswith('[')
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+    assert 'test-secret' in Path(paths[0][0]).read_text()
 
 
 def test_atomic_credentials_keep_old_file_on_failure(monkeypatch, tmp_path):
@@ -343,6 +458,22 @@ def test_atomic_credentials_keep_old_file_on_failure(monkeypatch, tmp_path):
         verda_adaptor._write_private(str(path), 'new')
     assert path.read_text() == 'old'
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize(
+    'subpath,target',
+    [(None, 'bucket'),
+     ('jobs/workspaces/team/run', 'bucket/jobs/workspaces/team/run')])
+def test_cached_mount_keeps_subpath(monkeypatch, subpath, target):
+    store = storage_lib.VerdaStore.__new__(storage_lib.VerdaStore)
+    store.name = 'bucket'
+    store.bucket = MagicMock(name='bucket')
+    store.bucket.name = 'bucket'
+    store._bucket_sub_path = subpath
+    monkeypatch.setattr(storage_lib.data_utils.Rclone.RcloneStores,
+                        'get_config', lambda *args, **kwargs: 'config')
+    command = store.mount_cached_command('/data')
+    assert f'sky-verda-bucket:{target} /data' in command
 
 
 @pytest.mark.parametrize('image', [
@@ -374,6 +505,61 @@ def test_pending_instance_wait_times_out(monkeypatch):
         verda_instance.run_instances('FIN-03', 'cluster', 'cluster',
                                      MagicMock())
     create.assert_not_called()
+
+
+def test_spot_cpu_selection_prefers_available_type(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cheap', 'available'],
+        'Region': ['FIN-03', 'FIN-03'],
+        'vCPUs': [4, 4],
+        'MemoryGiB': [16, 16],
+        'Price': [0.1, 0.2],
+        'SpotPrice': [0.02, 0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = (
+        lambda is_spot: {('available', 'FIN-03')}
+        if is_spot else {('cheap', 'FIN-03')})
+    assert verda_catalog.get_default_instance_type(use_spot=True) == 'available'
+
+
+def test_cpu_selection_falls_back_when_stock_unknown(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cpu'],
+        'Region': ['FIN-03'],
+        'vCPUs': [4],
+        'MemoryGiB': [16],
+        'Price': [0.1],
+        'SpotPrice': [0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.side_effect = RuntimeError('offline')
+    assert verda_catalog.get_default_instance_type(use_spot=True) == 'cpu'
+
+
+def test_failed_refresh_keeps_last_good_catalog(monkeypatch, live_catalog):
+    offerings = pd.DataFrame({'InstanceType': ['live-only']})
+    monkeypatch.setattr(verda_catalog, '_offerings', (0, offerings))
+    fetch = MagicMock(side_effect=RuntimeError('offline'))
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', fetch)
+    assert verda_catalog._offerings_df() is offerings
+    assert verda_catalog._offerings_df() is offerings
+    fetch.assert_called_once()
+
+
+def test_cpu_selection_returns_none_without_spot_prices(monkeypatch,
+                                                        live_catalog):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cpu'],
+        'Region': ['FIN-03'],
+        'vCPUs': [4],
+        'MemoryGiB': [16],
+        'Price': [0.1],
+        'SpotPrice': [None],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.return_value = set()
+    assert verda_catalog.get_default_instance_type(use_spot=True) is None
 
 
 def test_pending_instance_is_reused_when_ready(monkeypatch):
@@ -413,3 +599,42 @@ def test_custom_image_failure_does_not_trigger_fallback(monkeypatch):
         verda_instance.run_instances('FIN-03', 'cluster', 'cluster', config)
     fallback.assert_not_called()
     create.assert_called_once()
+
+
+def test_storage_profiles_use_separate_generated_files(monkeypatch,
+                                                       cli_storage_credentials):
+    first = verda_adaptor.local_s3_files()
+    monkeypatch.setattr(
+        verda_adaptor, '_cli_s3_section', lambda: {
+            'verda_s3_access_key': 'other-access',
+            'verda_s3_secret_key': 'other-secret',
+        })
+    second = verda_adaptor.local_s3_files()
+    assert first != second
+    assert 'test-secret' in Path(first[0]).read_text()
+    assert 'other-secret' in Path(second[0]).read_text()
+
+
+@pytest.mark.parametrize('available,expected',
+                         [({'available'}, ['available']),
+                          (set(), ['cheap', 'available'])])
+def test_gpu_selection_prefers_stock_with_fallback(monkeypatch, live_catalog,
+                                                   available, expected):
+    offerings = pd.DataFrame({
+        'InstanceType': ['cheap', 'available'],
+        'Region': ['FIN-03', 'FIN-03'],
+        'vCPUs': [4, 4],
+        'MemoryGiB': [16, 16],
+        'AcceleratorName': ['H100', 'H100'],
+        'AcceleratorCount': [1, 1],
+        'Price': [0.1, 0.2],
+        'SpotPrice': [0.02, 0.05],
+    })
+    monkeypatch.setattr(verda_catalog, '_fetch_offerings', lambda: offerings)
+    live_catalog.instance_availability_get.return_value = {
+        (name, 'FIN-03') for name in available
+    }
+    matches, _ = verda_catalog.get_instance_type_for_accelerator('H100',
+                                                                 1,
+                                                                 use_spot=True)
+    assert matches == expected

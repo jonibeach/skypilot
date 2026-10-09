@@ -76,6 +76,8 @@ STORE_ENABLED_CLOUDS: List[str] = [
     huggingface.NAME,
 ]
 
+NO_BUCKET_CREATION_CLOUDS: List[str] = [str(clouds.Verda())]
+
 # Maximum number of concurrent rsync upload processes
 _MAX_CONCURRENT_UPLOADS = 32
 
@@ -5283,6 +5285,7 @@ class VerdaStore(S3CompatibleStore):
     @classmethod
     def get_config(cls) -> S3CompatibleConfig:
         """Return the configuration for Verda Object Storage."""
+        credentials_path, config_path = verda.local_s3_files(write=False)
         return S3CompatibleConfig(
             store_type='VERDA',
             url_prefix='verda://',
@@ -5292,12 +5295,16 @@ class VerdaStore(S3CompatibleStore):
             verify_bucket=data_utils.verify_verda_bucket,
             aws_profile=verda.VERDA_S3_PROFILE_NAME,
             get_endpoint_url=verda.get_endpoint,
-            credentials_file=verda.local_s3_files()[0],
-            config_file=verda.local_s3_files()[1],
+            credentials_file=credentials_path,
+            config_file=config_path,
             cloud_name=str(clouds.Verda()),
             default_region=verda.DEFAULT_REGION,
             mount_cmd_factory=cls._get_verda_mount_cmd,
         )
+
+    def initialize(self):
+        verda.local_s3_files()
+        super().initialize()
 
     def _get_bucket(self):
         bucket = self.config.resource_factory(self.name)
@@ -5337,9 +5344,11 @@ class VerdaStore(S3CompatibleStore):
             data_utils.Rclone.RcloneStores.VERDA.get_profile_name(self.name))
         rclone_config = data_utils.Rclone.RcloneStores.VERDA.get_config(
             rclone_profile_name=rclone_profile_name)
+        bucket_path = self.bucket.name
+        if self._bucket_sub_path:
+            bucket_path += f'/{self._bucket_sub_path}'
         mount_cached_cmd = mounting_utils.get_mount_cached_cmd(
-            rclone_config, rclone_profile_name, self.bucket.name, mount_path,
-            config)
+            rclone_config, rclone_profile_name, bucket_path, mount_path, config)
         return mounting_utils.get_mounting_command(mount_path, install_cmd,
                                                    mount_cached_cmd)
 

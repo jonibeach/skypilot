@@ -1930,6 +1930,8 @@ Verda object storage
 
 Verda also offers S3-compatible object storage. SkyPilot can download/upload data to Verda buckets and mount them as a local filesystem on clusters launched by SkyPilot. To set up Verda object storage support:
 
+Create buckets in the Verda console before using them. The beta S3 API does not support bucket creation. Mount an existing bucket with ``source: verda://<bucket>``. For managed-job uploads, set ``jobs.bucket: verda://<bucket>/<prefix>`` in your SkyPilot config.
+
 1. Install the AWS dependencies:
 
 .. code-block:: shell
