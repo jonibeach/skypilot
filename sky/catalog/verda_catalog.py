@@ -32,6 +32,8 @@ _PULL_FREQUENCY_HOURS = 7
 _hosted_df = common.read_catalog('verda/vms.csv',
                                  pull_frequency_hours=_PULL_FREQUENCY_HOURS)
 _OFFERINGS_TTL_SECONDS = 3600
+# Verda spot stock changes within minutes, while the hosted catalog refreshes
+# about every 7 hours.
 _AVAILABILITY_TTL_SECONDS = 60
 _RETRY_SECONDS = 60
 

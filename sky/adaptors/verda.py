@@ -184,6 +184,8 @@ def handle_error(response: requests.Response) -> None:
         raise VerdaException(code, message)
 
 
+# requests waits forever by default, and the live catalog makes these calls
+# while holding a lock.
 _TIMEOUT_SECONDS = 30
 
 
