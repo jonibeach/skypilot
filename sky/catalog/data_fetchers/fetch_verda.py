@@ -222,6 +222,9 @@ def write_catalog(f, instance_types: List[Dict], locations: List[str]):
                 accelerator_name = ''
                 gpu_info = ''
 
+            # /instance-types has no location data, and /instance-availability
+            # lists only what is in stock right now. So list every type in
+            # every location and leave stock to the provisioner's failover.
             for region in locations:
                 writer.writerow([
                     instance_type_id,
