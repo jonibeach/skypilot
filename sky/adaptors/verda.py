@@ -3,9 +3,12 @@
 import configparser
 import contextlib
 import dataclasses
+import hashlib
+import json
 from json import load as json_load
 from json import loads
 import os
+import tempfile
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -213,6 +216,9 @@ def handle_error(response: requests.Response) -> None:
         raise VerdaException(code, message)
 
 
+_TIMEOUT_SECONDS = 30
+
+
 class _AuthenticationService:
     """A service for client authentication."""
 
@@ -247,7 +253,7 @@ class _AuthenticationService:
         response = requests.post(url,
                                  json=payload,
                                  headers=self.generate_headers(),
-                                 timeout=30)
+                                 timeout=_TIMEOUT_SECONDS)
         handle_error(response)
 
         auth_data = response.json()
@@ -284,7 +290,8 @@ class _AuthenticationService:
 
         response = requests.post(url,
                                  json=payload,
-                                 headers=self.generate_headers())
+                                 headers=self.generate_headers(),
+                                 timeout=_TIMEOUT_SECONDS)
 
         # if refresh token is also expired, authenticate again:
         if response.status_code == 401 or response.status_code == 400:
@@ -377,6 +384,7 @@ class _HTTPClient:
                                  json=body,
                                  headers=headers,
                                  params=params,
+                                 timeout=_TIMEOUT_SECONDS,
                                  **kwargs)
         handle_error(response)
 
@@ -414,6 +422,7 @@ class _HTTPClient:
                                 json=body,
                                 headers=headers,
                                 params=params,
+                                timeout=_TIMEOUT_SECONDS,
                                 **kwargs)
         handle_error(response)
 
@@ -444,7 +453,11 @@ class _HTTPClient:
         url = self._add_base_url(url)
         headers = self._generate_headers()
 
-        response = requests.get(url, params=params, headers=headers, **kwargs)
+        response = requests.get(url,
+                                params=params,
+                                headers=headers,
+                                timeout=_TIMEOUT_SECONDS,
+                                **kwargs)
         handle_error(response)
 
         return response
@@ -478,6 +491,7 @@ class _HTTPClient:
                                   json=body,
                                   headers=headers,
                                   params=params,
+                                  timeout=_TIMEOUT_SECONDS,
                                   **kwargs)
         handle_error(response)
 
@@ -515,6 +529,7 @@ class _HTTPClient:
                                    headers=headers,
                                    json=body,
                                    params=params,
+                                   timeout=_TIMEOUT_SECONDS,
                                    **kwargs)
         handle_error(response)
 
@@ -886,30 +901,55 @@ def _cli_s3_section():
 
 
 def _write_private(path: str, content: str):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.write(content)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w',
+                                     encoding='utf-8',
+                                     dir=directory,
+                                     delete=False) as f:
+        temporary_path = f.name
+        try:
+            f.write(content)
+            f.close()
+            os.replace(temporary_path, path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
 
-def local_s3_files():
+def get_compute_credential_file_mounts():
+    configured, _, config = get_verda_configuration()
+    if not configured or config is None:
+        return {}
+    content = json.dumps(dataclasses.asdict(config), sort_keys=True)
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    path = os.path.expanduser(
+        f'{_GENERATED_S3_DIR}/compute/{digest}/config.json')
+    _write_private(path, content)
+    return {'~/.verda/config.json': path}
+
+
+def local_s3_files(write: bool = True):
     if verda_s3_profile_in_cred() and verda_s3_profile_in_config():
         return VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH
     section = _cli_s3_section()
     if section is None:
         return VERDA_S3_CREDENTIALS_PATH, VERDA_S3_CONFIG_PATH
-    directory = os.path.expanduser(_GENERATED_S3_DIR)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    credentials_path = os.path.join(directory, 's3.credentials')
-    config_path = os.path.join(directory, 's3.config')
-    _write_private(
-        credentials_path, f'[{VERDA_S3_PROFILE_NAME}]\n'
+    credentials = (
+        f'[{VERDA_S3_PROFILE_NAME}]\n'
         f'aws_access_key_id = {section["verda_s3_access_key"]}\n'
         f'aws_secret_access_key = {section["verda_s3_secret_key"]}\n')
-    _write_private(
-        config_path, f'[profile {VERDA_S3_PROFILE_NAME}]\n'
-        'endpoint_url = '
-        f'{section.get("verda_s3_endpoint", _DEFAULT_ENDPOINT)}\n'
-        f'region = {section.get("verda_s3_region", DEFAULT_REGION)}\n')
+    config = (f'[profile {VERDA_S3_PROFILE_NAME}]\n'
+              'endpoint_url = '
+              f'{section.get("verda_s3_endpoint", _DEFAULT_ENDPOINT)}\n'
+              f'region = {section.get("verda_s3_region", DEFAULT_REGION)}\n')
+    digest = hashlib.sha256((credentials + config).encode()).hexdigest()
+    directory = os.path.expanduser(f'{_GENERATED_S3_DIR}/s3/{digest}')
+    credentials_path = os.path.join(directory, 's3.credentials')
+    config_path = os.path.join(directory, 's3.config')
+    if write:
+        _write_private(credentials_path, credentials)
+        _write_private(config_path, config)
     return credentials_path, config_path
 
 

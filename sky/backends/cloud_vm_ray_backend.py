@@ -6011,10 +6011,11 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 controller = controller_utils.Controllers.from_name(
                     handle.cluster_name)
                 assert (controller is not None), handle.cluster_name
-                if (controller
+                cloud = handle.launched_resources.cloud
+                if isinstance(cloud, clouds.Verda) or (
+                        controller
                         == controller_utils.Controllers.SKY_SERVE_CONTROLLER and
-                        isinstance(handle.launched_resources.cloud,
-                                   clouds.Kubernetes)):
+                        isinstance(cloud, clouds.Kubernetes)):
                     # For SkyServe controllers on Kubernetes: override autostop
                     # behavior to force autodown (instead of no-op)
                     # to avoid dangling controllers.
@@ -6027,10 +6028,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                          'autostop', 'down'), None)
                     if config_override_down is False:  # will not match None
                         logger.warning(
-                            'SkyServe controller autodown is disabled in the '
-                            '~/.sky/config.yaml configuration file '
-                            '(serve.controller.autostop.down_when_idle), but '
-                            'it is force enabled for Kubernetes clusters.')
+                            f'{controller.value.name.capitalize()} autodown '
+                            'is disabled in the ~/.sky/config.yaml '
+                            'configuration file '
+                            f'({controller.value.controller_type}.controller.'
+                            'autostop.down), but it is force enabled for '
+                            f'{cloud} clusters.')
 
                     down = True
                 else:

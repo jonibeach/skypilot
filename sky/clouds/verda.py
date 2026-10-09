@@ -56,7 +56,7 @@ class Verda(clouds.Cloud):
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}'),
     }
-    _MAX_CLUSTER_NAME_LEN_LIMIT = 120
+    _MAX_CLUSTER_NAME_LEN_LIMIT = 52
     _MAX_VOLUME_NAME_LEN_LIMIT = 30
     CREDENTIALS_PATH = os.path.expanduser('~/.verda/config.json')
     PROVISIONER_VERSION = clouds.ProvisionerVersion.SKYPILOT
@@ -89,7 +89,7 @@ class Verda(clouds.Cloud):
         return unsupported_features
 
     @classmethod
-    def _max_cluster_name_length(cls) -> Optional[int]:
+    def max_cluster_name_length(cls) -> Optional[int]:
         return cls._MAX_CLUSTER_NAME_LEN_LIMIT
 
     @classmethod
@@ -381,9 +381,8 @@ class Verda(clouds.Cloud):
 
     def get_credential_file_mounts(self) -> Dict[str, str]:
         credential_file_mounts = verda_adaptor.get_s3_credential_file_mounts()
-        if os.path.exists(self.CREDENTIALS_PATH):
-            credential_file_mounts['~/.verda/config.json'] = (
-                self.CREDENTIALS_PATH)
+        credential_file_mounts.update(
+            verda_adaptor.get_compute_credential_file_mounts())
         return credential_file_mounts
 
     @classmethod
