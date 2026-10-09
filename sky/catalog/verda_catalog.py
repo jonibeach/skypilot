@@ -8,7 +8,7 @@ import io
 import threading
 import time
 import typing
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from sky import sky_logging
 from sky.adaptors import common as adaptors_common
@@ -33,15 +33,16 @@ _hosted_df = common.read_catalog('verda/vms.csv',
                                  pull_frequency_hours=_PULL_FREQUENCY_HOURS)
 _OFFERINGS_TTL_SECONDS = 3600
 _AVAILABILITY_TTL_SECONDS = 60
+_RETRY_SECONDS = 60
 
 _lock = threading.Lock()
 _client = verda.VerdaClient()
 _offerings: Optional[Tuple[float, 'pd.DataFrame']] = None
-_available: Optional[Tuple[float, 'pd.DataFrame']] = None
+_in_stock: Optional[Tuple[float, Dict[bool, Set[Tuple[str, str]]]]] = None
 
 
-def _is_fresh(cached, ttl_seconds: int):
-    return cached is not None and time.time() - cached[0] < ttl_seconds
+def _is_fresh(cached):
+    return cached is not None and time.time() < cached[0]
 
 
 def _fetch_offerings():
@@ -52,45 +53,48 @@ def _fetch_offerings():
     return pd.read_csv(buffer)
 
 
-def _fetch_available(offerings: 'pd.DataFrame'):
-    df = offerings.copy()
-    keys = list(zip(df['InstanceType'], df['Region']))
-    on_demand = _client.instance_availability_get(is_spot=False)
-    spot = _client.instance_availability_get(is_spot=True)
-    df.loc[[key not in on_demand for key in keys], 'Price'] = None
-    df.loc[[key not in spot for key in keys], 'SpotPrice'] = None
-    return df
-
-
 def _offerings_df():
     global _offerings
     if not verda.get_verda_configuration()[0]:
         return _hosted_df
     with _lock:
-        if not _is_fresh(_offerings, _OFFERINGS_TTL_SECONDS):
+        if not _is_fresh(_offerings):
             try:
-                _offerings = (time.time(), _fetch_offerings())
+                offerings = _fetch_offerings()
+                _offerings = (time.time() + _OFFERINGS_TTL_SECONDS, offerings)
             except Exception as e:  # pylint: disable=broad-except
                 logger.debug(f'Failed to fetch the live Verda catalog: {e}')
-                return _hosted_df
+                _, cached = _offerings or (0, _hosted_df)
+                _offerings = (time.time() + _RETRY_SECONDS, cached)
         assert _offerings is not None
         return _offerings[1]
 
 
-def _available_df():
-    global _available
-    offerings = _offerings_df()
-    if offerings is _hosted_df:
-        return _hosted_df
+def _stock_for_mode(use_spot: bool):
+    global _in_stock
+    if not verda.get_verda_configuration()[0]:
+        return set()
     with _lock:
-        if not _is_fresh(_available, _AVAILABILITY_TTL_SECONDS):
+        if not _is_fresh(_in_stock):
             try:
-                _available = (time.time(), _fetch_available(offerings))
+                stock = {
+                    is_spot: _client.instance_availability_get(is_spot)
+                    for is_spot in (False, True)
+                }
+                _in_stock = (time.time() + _AVAILABILITY_TTL_SECONDS, stock)
             except Exception as e:  # pylint: disable=broad-except
                 logger.debug(f'Failed to fetch Verda availability: {e}')
-                return offerings
-        assert _available is not None
-        return _available[1]
+                _, cached = _in_stock or (0, {False: set(), True: set()})
+                _in_stock = (time.time() + _RETRY_SECONDS, cached)
+        assert _in_stock is not None
+        return _in_stock[1][use_spot]
+
+
+def _in_stock_regions(instance_type: str, use_spot: bool):
+    return {
+        region for type_, region in _stock_for_mode(use_spot)
+        if type_ == instance_type
+    }
 
 
 def instance_type_exists(instance_type: str) -> bool:
@@ -119,6 +123,16 @@ def get_vcpus_mem_from_instance_type(
                                                         instance_type)
 
 
+def _candidate_dfs(use_spot: bool):
+    offerings = _offerings_df()
+    price_column = 'SpotPrice' if use_spot else 'Price'
+    offerings = offerings.dropna(subset=[price_column])
+    stock = _stock_for_mode(use_spot)
+    in_stock = offerings.loc[[(row.InstanceType, row.Region) in stock
+                              for row in offerings.itertuples()]]
+    return in_stock, offerings
+
+
 def get_default_instance_type(
         cpus: Optional[str] = None,
         memory: Optional[str] = None,
@@ -131,9 +145,12 @@ def get_default_instance_type(
     del disk_tier, local_disk  # Verda Cloud does not support disk tiers.
     # NOTE: After expanding catalog to multiple entries, you may
     # want to specify a default instance type or family.
-    return common.get_instance_type_for_cpus_mem_impl(_available_df(), cpus,
-                                                      memory, region, zone,
-                                                      use_spot, max_hourly_cost)
+    for candidates in _candidate_dfs(use_spot):
+        instance_type = common.get_instance_type_for_cpus_mem_impl(
+            candidates, cpus, memory, region, zone, use_spot, max_hourly_cost)
+        if instance_type is not None:
+            return instance_type
+    return None
 
 
 def get_accelerators_from_instance_type(
@@ -155,23 +172,30 @@ def get_instance_type_for_accelerator(
 ) -> Tuple[Optional[List[str]], List[str]]:
     """Returns a list of instance types that have the given accelerator."""
     del local_disk  # Verda Cloud does not support local disk.
-    return common.get_instance_type_for_accelerator_impl(
-        df=_available_df(),
-        acc_name=acc_name,
-        acc_count=acc_count,
-        cpus=cpus,
-        memory=memory,
-        use_spot=use_spot,
-        region=region,
-        zone=zone,
-        max_hourly_cost=max_hourly_cost)
+    result: Tuple[Optional[List[str]], List[str]] = ([], [])
+    for candidates in _candidate_dfs(use_spot):
+        result = common.get_instance_type_for_accelerator_impl(
+            df=candidates,
+            acc_name=acc_name,
+            acc_count=acc_count,
+            cpus=cpus,
+            memory=memory,
+            use_spot=use_spot,
+            region=region,
+            zone=zone,
+            max_hourly_cost=max_hourly_cost)
+        if result[0]:
+            return result
+    return result
 
 
 def get_region_zones_for_instance_type(instance_type: str,
                                        use_spot: bool) -> List['cloud.Region']:
-    df = _available_df()
-    df = df[df['InstanceType'] == instance_type]
-    return common.get_region_zones(df, use_spot)
+    df = _offerings_df()
+    regions = common.get_region_zones(df[df['InstanceType'] == instance_type],
+                                      use_spot)
+    in_stock = _in_stock_regions(instance_type, use_spot)
+    return sorted(regions, key=lambda region: region.name not in in_stock)
 
 
 def list_accelerators(
@@ -184,7 +208,7 @@ def list_accelerators(
         require_price: bool = True) -> Dict[str, List[common.InstanceTypeInfo]]:
     """Returns all instance types in Verda Cloud offering accelerators."""
     del require_price  # Unused.
-    return common.list_accelerators_impl('Verda', _available_df(), gpus_only,
+    return common.list_accelerators_impl('Verda', _offerings_df(), gpus_only,
                                          name_filter, region_filter,
                                          quantity_filter, case_sensitive,
                                          all_regions)
